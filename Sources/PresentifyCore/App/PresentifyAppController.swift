@@ -54,7 +54,16 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
 
         if !settings.hasCompletedWelcomeTour {
             openWelcomeTourWindow()
+        } else {
+            openSettingsWindow()
         }
+    }
+
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            openSettingsWindow()
+        }
+        return true
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -119,7 +128,10 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
         if welcomeTourWindow == nil {
             let tourView = WelcomeTourView(
                 settings: settings,
-                onFinish: { [weak self] in self?.welcomeTourWindow?.close() }
+                onFinish: { [weak self] in
+                    self?.welcomeTourWindow?.close()
+                    self?.openSettingsWindow()
+                }
             )
             let hosting = NSHostingController(rootView: tourView)
             let window = NSWindow(contentViewController: hosting)

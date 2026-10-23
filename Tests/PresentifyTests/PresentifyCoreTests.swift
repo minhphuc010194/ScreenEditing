@@ -421,5 +421,10 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(WelcomeTourView.pages.first?.title, "Welcome to ScreenEditing")
         XCTAssertEqual(SettingsView.appVersionText, "Version 8.1.2 (Build 68)")
         XCTAssertEqual(SettingsView.copyrightText, "© Softal.io. All rights reserved.")
+
+        XCTAssertNil(appController.settingsWindow)
+        XCTAssertTrue(appController.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false))
+        XCTAssertNotNil(appController.settingsWindow)
+        appController.settingsWindow?.close()
     }
 }
