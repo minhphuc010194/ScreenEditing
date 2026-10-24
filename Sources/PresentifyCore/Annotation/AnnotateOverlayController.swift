@@ -864,8 +864,9 @@ public final class AnnotateOverlayController {
             .store(in: &cancellables)
 
         settings.$isShowingShortcutsCheatsheet
+            .combineLatest(settings.$annotateControlsVertical)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateAuxiliaryPanels() }
+            .sink { [weak self] _, _ in self?.updateAuxiliaryPanels() }
             .store(in: &cancellables)
     }
 
@@ -885,20 +886,13 @@ public final class AnnotateOverlayController {
                     onSaveScreenshot: { [weak self] in _ = self?.saveScreenshot() },
                     onClear: { [weak self] in self?.canvasState.clearAll() },
                     onToggleShortcuts: { [weak self] in self?.settings.isShowingShortcutsCheatsheet.toggle() },
-                    onClose: { [weak self] in self?.hideAnnotation() },
-                    onDragToolbar: { [weak self] translation in
-                        guard let cPanel = self?.controlsPanel else { return }
-                        let origin = cPanel.frame.origin
-                        cPanel.setFrameOrigin(
-                            NSPoint(
-                                x: origin.x + translation.width,
-                                y: origin.y - translation.height
-                            )
-                        )
-                    }
+                    onClose: { [weak self] in self?.hideAnnotation() }
                 )
                 let hosting = FirstMouseHostingView(rootView: toolbarView)
-                hosting.frame = NSRect(x: 0, y: 0, width: 760, height: 54)
+                let fitting = hosting.fittingSize
+                let width = fitting.width > 0 ? fitting.width : 720
+                let height = fitting.height > 0 ? fitting.height : 52
+                hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)
                 let cPanel = FloatingControlPanel(contentRect: hosting.frame)
                 cPanel.onKeyDown = { [weak self] event in
                     self?.canvasView?.handleKeyCommand(
@@ -908,9 +902,15 @@ public final class AnnotateOverlayController {
                 }
                 cPanel.contentView = hosting
                 if let visible = NSScreen.main?.visibleFrame {
-                    cPanel.setFrameOrigin(NSPoint(x: visible.midX - 380, y: visible.minY + 36))
+                    cPanel.setFrameOrigin(NSPoint(x: visible.midX - width * 0.5, y: visible.minY + 36))
                 }
                 controlsPanel = cPanel
+            } else if let cPanel = controlsPanel, let hosting = cPanel.contentView {
+                let fitting = hosting.fittingSize
+                let hasValidFittingSize = fitting.width > 0 && fitting.height > 0
+                if hasValidFittingSize && cPanel.frame.size != fitting {
+                    cPanel.setContentSize(fitting)
+                }
             }
             controlsPanel?.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
             controlsPanel?.orderFrontRegardless()
@@ -925,7 +925,10 @@ public final class AnnotateOverlayController {
                     onClose: { [weak self] in self?.settings.isShowingShortcutsCheatsheet = false }
                 )
                 let hosting = FirstMouseHostingView(rootView: hud)
-                hosting.frame = NSRect(x: 0, y: 0, width: 560, height: 440)
+                let fitting = hosting.fittingSize
+                let width = fitting.width > 0 ? fitting.width : 560
+                let height = fitting.height > 0 ? fitting.height : 440
+                hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)
                 let sPanel = FloatingControlPanel(contentRect: hosting.frame)
                 sPanel.onKeyDown = { [weak self] event in
                     self?.canvasView?.handleKeyCommand(
@@ -935,7 +938,7 @@ public final class AnnotateOverlayController {
                 }
                 sPanel.contentView = hosting
                 if let visible = NSScreen.main?.visibleFrame {
-                    sPanel.setFrameOrigin(NSPoint(x: visible.midX - 280, y: visible.midY - 220))
+                    sPanel.setFrameOrigin(NSPoint(x: visible.midX - width * 0.5, y: visible.midY - height * 0.5))
                 }
                 shortcutsPanel = sPanel
             }

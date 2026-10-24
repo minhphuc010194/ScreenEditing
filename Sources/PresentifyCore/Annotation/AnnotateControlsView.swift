@@ -3,6 +3,9 @@ import SwiftUI
 
 public final class FloatingControlPanel: NSPanel {
     public var onKeyDown: ((NSEvent) -> Bool)?
+    private var dragStartMouseLocation: NSPoint?
+    private var dragStartWindowOrigin: NSPoint?
+    private var isDraggingPanel = false
 
     public init(contentRect: NSRect) {
         super.init(
@@ -22,6 +25,54 @@ public final class FloatingControlPanel: NSPanel {
 
     override public var canBecomeKey: Bool { false }
     override public var canBecomeMain: Bool { false }
+
+    override public func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            dragStartMouseLocation = NSEvent.mouseLocation
+            dragStartWindowOrigin = frame.origin
+            isDraggingPanel = false
+            super.sendEvent(event)
+        case .leftMouseDragged:
+            if let startMouse = dragStartMouseLocation, let startOrigin = dragStartWindowOrigin {
+                let currentMouse = NSEvent.mouseLocation
+                let dx = currentMouse.x - startMouse.x
+                let dy = currentMouse.y - startMouse.y
+                if !isDraggingPanel && hypot(dx, dy) >= 2.5 {
+                    isDraggingPanel = true
+                }
+                if isDraggingPanel {
+                    setFrameOrigin(NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy))
+                    return
+                }
+            }
+            super.sendEvent(event)
+        case .leftMouseUp:
+            let wasDragging = isDraggingPanel
+            dragStartMouseLocation = nil
+            dragStartWindowOrigin = nil
+            isDraggingPanel = false
+            if wasDragging {
+                if let cancelUp = NSEvent.mouseEvent(
+                    with: .leftMouseUp,
+                    location: NSPoint(x: -100, y: -100),
+                    modifierFlags: event.modifierFlags,
+                    timestamp: event.timestamp,
+                    windowNumber: windowNumber,
+                    context: nil,
+                    eventNumber: event.eventNumber,
+                    clickCount: 0,
+                    pressure: 0
+                ) {
+                    super.sendEvent(cancelUp)
+                }
+                return
+            }
+            super.sendEvent(event)
+        default:
+            super.sendEvent(event)
+        }
+    }
 
     override public func keyDown(with event: NSEvent) {
         if onKeyDown?(event) == true {
@@ -178,8 +229,6 @@ public struct AnnotateControlsView: View {
     public var onClose: () -> Void
     public var onDragToolbar: (CGSize) -> Void
 
-    @State private var lastDragTranslation: CGSize = .zero
-
     public init(
         settings: AppSettings,
         canvasState: AnnotationCanvasState? = nil,
@@ -228,26 +277,20 @@ public struct AnnotateControlsView: View {
     }
 
     private var dragHandleSection: some View {
-        Image(systemName: "circle.grid.2x3.fill")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .frame(width: 22, height: 28)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                    .onChanged { value in
-                        let delta = CGSize(
-                            width: value.translation.width - lastDragTranslation.width,
-                            height: value.translation.height - lastDragTranslation.height
-                        )
-                        lastDragTranslation = value.translation
-                        onDragToolbar(delta)
+        HStack(spacing: 3) {
+            ForEach(0..<2, id: \.self) { _ in
+                VStack(spacing: 3) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        Circle()
+                            .fill(Color.secondary.opacity(0.75))
+                            .frame(width: 3.5, height: 3.5)
                     }
-                    .onEnded { _ in
-                        lastDragTranslation = .zero
-                    }
-            )
-            .help("Drag Toolbar")
+                }
+            }
+        }
+        .frame(width: 18, height: 28)
+        .contentShape(Rectangle())
+        .help("Drag Toolbar")
     }
 
     private var colorPaletteSection: some View {
