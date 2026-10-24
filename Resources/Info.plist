@@ -8,6 +8,10 @@
     <string>ScreenEditing</string>
     <key>CFBundleExecutable</key>
     <string>ScreenEditing</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.screenediting.app</string>
     <key>CFBundleInfoDictionaryVersion</key>

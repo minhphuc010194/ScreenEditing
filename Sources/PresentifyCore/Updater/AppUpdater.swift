@@ -111,7 +111,8 @@ public final class AppUpdater: ObservableObject {
     }
 
     public var currentVersion: String {
-        let isAppBundle = Bundle.main.bundleIdentifier == "com.softal.presentify"
+        let bundleID = Bundle.main.bundleIdentifier
+        let isAppBundle = bundleID == "com.screenediting.app" || bundleID == "com.softal.presentify"
         guard isAppBundle,
               let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
               !version.isEmpty else {

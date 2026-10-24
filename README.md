@@ -1,6 +1,12 @@
-# ScreenEditing for macOS
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="ScreenEditing Logo" width="140" height="140" />
+</p>
 
-Native macOS screen annotation, whiteboard, cursor highlight, spotlight, and live cursor zoom application built with Swift 5.9 (`AppKit` + `SwiftUI` + `ScreenCaptureKit`) and a C++20 geometry engine (`CoreEngine`).
+<h1 align="center">ScreenEditing for macOS</h1>
+
+<p align="center">
+  Native macOS screen annotation, whiteboard, cursor highlight, spotlight, and live cursor zoom application built with Swift 5.9 (<code>AppKit</code> + <code>SwiftUI</code> + <code>ScreenCaptureKit</code>) and a C++20 geometry engine (<code>CoreEngine</code>).
+</p>
 
 ## Architecture
 
