@@ -35,6 +35,12 @@ public final class AppSettings: ObservableObject {
     @Published public var autoCheckUpdates: Bool {
         didSet { persist(autoCheckUpdates, forKey: Keys.autoCheckUpdates) }
     }
+    @Published public var automaticallyCheckForUpdates: Bool {
+        didSet { persist(automaticallyCheckForUpdates, forKey: Keys.automaticallyCheckForUpdates) }
+    }
+    @Published public var skippedUpdateVersion: String {
+        didSet { persist(skippedUpdateVersion, forKey: Keys.skippedUpdateVersion) }
+    }
     @Published public var hasCompletedWelcomeTour: Bool {
         didSet { persist(hasCompletedWelcomeTour, forKey: Keys.hasCompletedWelcomeTour) }
     }
@@ -368,6 +374,8 @@ public final class AppSettings: ObservableObject {
         self.showMenuBarIcon = Self.loadBool(from: defaults, key: Keys.showMenuBarIcon, fallback: true)
         self.showDockIcon = Self.loadBool(from: defaults, key: Keys.showDockIcon, fallback: false)
         self.autoCheckUpdates = Self.loadBool(from: defaults, key: Keys.autoCheckUpdates, fallback: true)
+        self.automaticallyCheckForUpdates = Self.loadBool(from: defaults, key: Keys.automaticallyCheckForUpdates, fallback: true)
+        self.skippedUpdateVersion = Self.loadString(from: defaults, key: Keys.skippedUpdateVersion, fallback: "")
         self.hasCompletedWelcomeTour = Self.loadBool(from: defaults, key: Keys.hasCompletedWelcomeTour, fallback: false)
         self.interactiveModeKey = Self.loadCodable(from: defaults, key: Keys.interactiveModeKey, fallback: .fn)
         self.annotateInteractiveMode = Self.loadBool(from: defaults, key: Keys.annotateInteractiveMode, fallback: false)
@@ -530,6 +538,8 @@ public final class AppSettings: ObservableObject {
         showMenuBarIcon = true
         showDockIcon = false
         autoCheckUpdates = true
+        automaticallyCheckForUpdates = true
+        skippedUpdateVersion = ""
         hasCompletedWelcomeTour = false
         interactiveModeKey = .fn
         annotateInteractiveMode = false
@@ -653,6 +663,8 @@ public final class AppSettings: ObservableObject {
         static let showMenuBarIcon = "presentify.showMenuBarIcon"
         static let showDockIcon = "presentify.showDockIcon"
         static let autoCheckUpdates = "presentify.autoCheckUpdates"
+        static let automaticallyCheckForUpdates = "presentify.automaticallyCheckForUpdates"
+        static let skippedUpdateVersion = "presentify.skippedUpdateVersion"
         static let hasCompletedWelcomeTour = "presentify.hasCompletedWelcomeTour"
         static let interactiveModeKey = "presentify.interactiveModeKey"
         static let annotateInteractiveMode = "presentify.annotateInteractiveMode"
@@ -714,7 +726,8 @@ public final class AppSettings: ObservableObject {
 
         static let all: [String] = [
             launchAtLogin, highlightCursorAtLogin, showMenuBarIcon, showDockIcon,
-            autoCheckUpdates, hasCompletedWelcomeTour, interactiveModeKey,
+            autoCheckUpdates, automaticallyCheckForUpdates, skippedUpdateVersion,
+            hasCompletedWelcomeTour, interactiveModeKey,
             annotateInteractiveMode, selectedSettingsTab, favColors,
             selectedColorIndex, useRandomColors, enableGradients, activeGradient,
             currentDrawMode, minLineWeight, maxLineWeight, lineWeight,

@@ -510,6 +510,7 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(WelcomeTourView.pages.first?.title, "Welcome to ScreenEditing")
         XCTAssertEqual(SettingsView.appVersionText, "Version 8.1.2 (Build 68)")
         XCTAssertEqual(SettingsView.copyrightText, "© Softal.io. All rights reserved.")
+        XCTAssertNotNil(SettingsView.appIconImage())
 
         XCTAssertNil(appController.settingsWindow)
         XCTAssertTrue(appController.handleAppKeyDown(keyCode: 0x2B, modifiers: KeyBinding.commandMask))
@@ -519,5 +520,84 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertTrue(appController.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false))
         XCTAssertNotNil(appController.settingsWindow)
         appController.settingsWindow?.close()
+    }
+
+    func testAppUpdaterVersionComparisonAndReleaseParsing() {
+        XCTAssertTrue(AppUpdater.isVersion("8.2.0", newerThan: "8.1.2"))
+        XCTAssertTrue(AppUpdater.isVersion("v8.1.3", newerThan: "8.1.2"))
+        XCTAssertTrue(AppUpdater.isVersion("8.1.2.1", newerThan: "8.1.2"))
+        XCTAssertFalse(AppUpdater.isVersion("8.1.2", newerThan: "8.1.2"))
+        XCTAssertFalse(AppUpdater.isVersion("8.0.9", newerThan: "8.1.2"))
+
+        let validAsset = ReleaseAssetInfo(
+            name: "ScreenEditing.app.zip",
+            browserDownloadURL: "https://github.com/minhphuc010194/ScreenEditing/releases/download/v8.2.0/ScreenEditing.app.zip",
+            size: 1024
+        )
+        let untrustedAsset = ReleaseAssetInfo(
+            name: "ScreenEditing.app.zip",
+            browserDownloadURL: "https://evil.example.com/ScreenEditing.app.zip",
+            size: 1024
+        )
+        XCTAssertNil(AppUpdater.validatedZipAssetURL(in: [untrustedAsset]))
+        XCTAssertNotNil(AppUpdater.validatedZipAssetURL(in: [untrustedAsset, validAsset]))
+
+        let settings = AppSettings(defaults: testDefaults)
+        let updater = AppUpdater(settings: settings)
+        var notifiedRelease: GitHubReleaseInfo?
+        updater.onUpdateAvailable = { release in
+            notifiedRelease = release
+        }
+
+        let notFoundStatus = updater.processReleaseResponse(
+            ReleaseHTTPResponse(data: Data(), statusCode: 404),
+            mode: .automatic
+        )
+        XCTAssertEqual(notFoundStatus, .upToDate(currentVersion: updater.currentVersion))
+
+        let newerJSON = """
+        {
+          "tag_name": "v9.0.0",
+          "name": "ScreenEditing 9.0.0",
+          "body": "Major update with new tools.",
+          "html_url": "https://github.com/minhphuc010194/ScreenEditing/releases/tag/v9.0.0",
+          "assets": [
+            {
+              "name": "ScreenEditing.app.zip",
+              "browser_download_url": "https://github.com/minhphuc010194/ScreenEditing/releases/download/v9.0.0/ScreenEditing.app.zip",
+              "size": 2048
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let availableStatus = updater.processReleaseResponse(
+            ReleaseHTTPResponse(data: newerJSON, statusCode: 200),
+            mode: .automatic
+        )
+        if case .updateAvailable(let release) = availableStatus {
+            XCTAssertEqual(release.tagName, "v9.0.0")
+            XCTAssertEqual(notifiedRelease?.tagName, "v9.0.0")
+            updater.skipRelease(release)
+        } else {
+            XCTFail("Expected updateAvailable status")
+        }
+
+        XCTAssertEqual(settings.skippedUpdateVersion, "v9.0.0")
+        let skippedAutoStatus = updater.processReleaseResponse(
+            ReleaseHTTPResponse(data: newerJSON, statusCode: 200),
+            mode: .automatic
+        )
+        XCTAssertEqual(skippedAutoStatus, .upToDate(currentVersion: updater.currentVersion))
+
+        let manualOverrideStatus = updater.processReleaseResponse(
+            ReleaseHTTPResponse(data: newerJSON, statusCode: 200),
+            mode: .userInitiated
+        )
+        if case .updateAvailable(let release) = manualOverrideStatus {
+            XCTAssertEqual(release.tagName, "v9.0.0")
+        } else {
+            XCTFail("Expected user-initiated check to show update even if previously skipped")
+        }
     }
 }

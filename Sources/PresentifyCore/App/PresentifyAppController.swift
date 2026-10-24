@@ -5,6 +5,7 @@ import SwiftUI
 public final class PresentifyAppController: NSObject, NSApplicationDelegate {
     public let settings: AppSettings
     public let shortcutManager: ShortcutManager
+    public let appUpdater: AppUpdater
     public let annotateController: AnnotateOverlayController
     public let highlightController: CursorHighlightWindowController
     public let spotlightController: CursorSpotlightWindowController
@@ -15,6 +16,7 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
     public private(set) var menuPopover: NSPopover?
     public private(set) var settingsWindow: NSWindow?
     public private(set) var welcomeTourWindow: NSWindow?
+    public private(set) var updateWindow: NSWindow?
 
     private var popoverGlobalClickMonitor: Any?
     private var popoverLocalClickMonitor: Any?
@@ -28,6 +30,7 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
     ) {
         self.settings = settings
         self.shortcutManager = shortcutManager
+        self.appUpdater = AppUpdater(settings: settings)
         self.annotateController = AnnotateOverlayController(settings: settings, shortcutManager: shortcutManager)
         self.highlightController = CursorHighlightWindowController(settings: settings)
         self.spotlightController = CursorSpotlightWindowController(settings: settings)
@@ -35,6 +38,9 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
         self.dockMenuController = PresentifyDockMenuController(settings: settings)
         super.init()
 
+        appUpdater.onUpdateAvailable = { [weak self] release in
+            self?.presentUpdateWindow(release: release)
+        }
         annotateController.onRequestOpenSettings = { [weak self] in self?.openSettingsWindow() }
         dockMenuController.onToggleAnnotate = { [weak self] in self?.annotateController.toggleAnnotation() }
         dockMenuController.onToggleHighlight = { [weak self] in self?.highlightController.toggle() }
@@ -54,14 +60,19 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
     deinit {
         stopPopoverMonitors()
         stopAppKeyMonitor()
+        appUpdater.stopAutomaticChecks()
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        if let icon = SettingsView.appIconImage() {
+            NSApp?.applicationIconImage = icon
+        }
         setupMainMenu()
         startAppKeyMonitor()
         applyDockVisibilityPolicy()
         setupMenuBarStatusItem()
         shortcutManager.registerGlobalHotKeys()
+        appUpdater.startAutomaticChecks()
 
         if settings.highlightCursorAtLogin {
             highlightController.show()
@@ -84,6 +95,7 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
     public func applicationWillTerminate(_ notification: Notification) {
         stopPopoverMonitors()
         stopAppKeyMonitor()
+        appUpdater.stopAutomaticChecks()
         shortcutManager.unregisterGlobalHotKeys()
         annotateController.hideAnnotation()
         highlightController.hide()
@@ -108,6 +120,14 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
         )
         aboutItem.target = self
         appMenu.addItem(aboutItem)
+
+        let updateItem = NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(checkForUpdatesFromMenu),
+            keyEquivalent: ""
+        )
+        updateItem.target = self
+        appMenu.addItem(updateItem)
         appMenu.addItem(.separator())
 
         let settingsItem = NSMenuItem(
@@ -162,6 +182,11 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
         openSettingsWindow(selectingTab: .about)
     }
 
+    @objc public func checkForUpdatesFromMenu() {
+        openSettingsWindow(selectingTab: .about)
+        appUpdater.checkForUpdates(mode: .userInitiated)
+    }
+
     @objc private func openSettingsFromMenu() {
         openSettingsWindow()
     }
@@ -196,6 +221,7 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
             let rootView = SettingsView(
                 settings: settings,
                 shortcutManager: shortcutManager,
+                appUpdater: appUpdater,
                 onOpenWelcomeTour: { [weak self] in self?.openWelcomeTourWindow() }
             )
             let hosting = NSHostingController(rootView: rootView)
@@ -209,6 +235,30 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
 
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    public func presentUpdateWindow(release: GitHubReleaseInfo) {
+        closeMenuPopover()
+        let view = UpdateNotificationView(
+            updater: appUpdater,
+            release: release,
+            onSkip: { [weak self] in self?.updateWindow?.close() },
+            onDismiss: { [weak self] in self?.updateWindow?.close() }
+        )
+        let hosting = NSHostingController(rootView: view)
+        if let window = updateWindow {
+            window.contentViewController = hosting
+        } else {
+            let window = NSWindow(contentViewController: hosting)
+            window.title = "Software Update"
+            window.styleMask = [.titled, .closable]
+            window.center()
+            window.isReleasedWhenClosed = false
+            updateWindow = window
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        updateWindow?.makeKeyAndOrderFront(nil)
     }
 
     public func openWelcomeTourWindow() {
@@ -292,6 +342,10 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
                 onOpenWelcomeTour: { [weak self] in
                     self?.closeMenuPopover()
                     self?.openWelcomeTourWindow()
+                },
+                onCheckForUpdates: { [weak self] in
+                    self?.closeMenuPopover()
+                    self?.checkForUpdatesFromMenu()
                 }
             )
             popover.contentViewController = NSHostingController(rootView: menuView)
@@ -367,6 +421,10 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
             }
             if settings.isAnnotating {
                 annotateController.hideAnnotation()
+                return true
+            }
+            if updateWindow?.isKeyWindow == true {
+                updateWindow?.close()
                 return true
             }
             if welcomeTourWindow?.isKeyWindow == true {

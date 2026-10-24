@@ -89,6 +89,7 @@ public struct ShortcutRecorderRow: View {
 public struct SettingsView: View {
     @ObservedObject public var settings: AppSettings
     @ObservedObject public var shortcutManager: ShortcutManager
+    @ObservedObject public var appUpdater: AppUpdater
     public var onOpenWelcomeTour: () -> Void
 
     @State private var isShowingRestoreAlert = false
@@ -96,13 +97,24 @@ public struct SettingsView: View {
     public static let appVersionText = "Version 8.1.2 (Build 68)"
     public static let copyrightText = "© Softal.io. All rights reserved."
 
+    public static func appIconImage() -> NSImage? {
+        if let bundled = Bundle.main.image(forResource: "AppIcon") {
+            return bundled
+        }
+        let repoIconURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Resources/AppIcon.png")
+        return NSImage(contentsOf: repoIconURL)
+    }
+
     public init(
         settings: AppSettings = .shared,
         shortcutManager: ShortcutManager = .shared,
+        appUpdater: AppUpdater = .shared,
         onOpenWelcomeTour: @escaping () -> Void = {}
     ) {
         self.settings = settings
         self.shortcutManager = shortcutManager
+        self.appUpdater = appUpdater
         self.onOpenWelcomeTour = onOpenWelcomeTour
     }
 
@@ -175,6 +187,7 @@ public struct SettingsView: View {
                 Toggle("Highlight Cursor at login", isOn: $settings.highlightCursorAtLogin)
                 Toggle("Show menu bar icon", isOn: $settings.showMenuBarIcon)
                 Toggle("Show Dock icon", isOn: $settings.showDockIcon)
+                Toggle("Automatically check for updates", isOn: $settings.automaticallyCheckForUpdates)
             }
 
             Section("Onboarding & Reset") {
@@ -407,22 +420,30 @@ public struct SettingsView: View {
 
     private var aboutTabContent: some View {
         VStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.54, green: 0.23, blue: 0.94),
-                                Color(red: 0.36, green: 0.14, blue: 0.76)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+            if let icon = Self.appIconImage() {
+                Image(nsImage: icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 96, height: 96)
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.54, green: 0.23, blue: 0.94),
+                                    Color(red: 0.36, green: 0.14, blue: 0.76)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .frame(width: 84, height: 84)
-                Image(systemName: "tv.and.mediabox")
-                    .font(.system(size: 38, weight: .bold))
-                    .foregroundStyle(.white)
+                        .frame(width: 84, height: 84)
+                    Image(systemName: "tv.and.mediabox")
+                        .font(.system(size: 38, weight: .bold))
+                        .foregroundStyle(.white)
+                }
             }
 
             Text("ScreenEditing")
@@ -435,6 +456,9 @@ public struct SettingsView: View {
             Text(Self.copyrightText)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+
+            updateStatusSection
+                .padding(.vertical, 4)
 
             HStack(spacing: 14) {
                 Button("X (Twitter)") {
@@ -469,6 +493,75 @@ public struct SettingsView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 16)
+    }
+
+    @ViewBuilder
+    private var updateStatusSection: some View {
+        switch appUpdater.status {
+        case .checking:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Checking for updates...")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        case .upToDate(let version):
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("ScreenEditing \(version) is up to date.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Button("Check Again") {
+                    appUpdater.checkForUpdates(mode: .userInitiated)
+                }
+                .controlSize(.small)
+            }
+        case .updateAvailable(let release):
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .foregroundStyle(.purple)
+                Text("Update available: \(release.tagName)")
+                    .font(.system(size: 12, weight: .semibold))
+                Button("Download & Install Update") {
+                    appUpdater.downloadAndInstall(release: release)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        case .downloading(let progress, let version):
+            VStack(spacing: 4) {
+                ProgressView(value: progress)
+                    .frame(width: 220)
+                Text("Downloading \(version)...")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        case .installing(let version):
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Installing \(version)...")
+                    .font(.system(size: 12))
+            }
+        case .failed(let message):
+            VStack(spacing: 6) {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                Button("Check for Updates") {
+                    appUpdater.checkForUpdates(mode: .userInitiated)
+                }
+                .controlSize(.small)
+            }
+        case .idle:
+            Button("Check for Updates") {
+                appUpdater.checkForUpdates(mode: .userInitiated)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
     }
 
     private func otherAppCard(name: String, subtitle: String, icon: String, url: String) -> some View {

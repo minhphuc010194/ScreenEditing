@@ -11,6 +11,7 @@ public struct PresentifyMenuView: View {
     public var onToggleZoom: () -> Void
     public var onOpenSettings: () -> Void
     public var onOpenWelcomeTour: () -> Void
+    public var onCheckForUpdates: () -> Void
     public var onQuit: () -> Void
 
     public init(
@@ -23,6 +24,7 @@ public struct PresentifyMenuView: View {
         onToggleZoom: @escaping () -> Void = {},
         onOpenSettings: @escaping () -> Void = {},
         onOpenWelcomeTour: @escaping () -> Void = {},
+        onCheckForUpdates: @escaping () -> Void = {},
         onQuit: @escaping () -> Void = { NSApp.terminate(nil) }
     ) {
         self.settings = settings
@@ -34,6 +36,7 @@ public struct PresentifyMenuView: View {
         self.onToggleZoom = onToggleZoom
         self.onOpenSettings = onOpenSettings
         self.onOpenWelcomeTour = onOpenWelcomeTour
+        self.onCheckForUpdates = onCheckForUpdates
         self.onQuit = onQuit
     }
 
@@ -89,6 +92,14 @@ public struct PresentifyMenuView: View {
                 shortcut: "",
                 isActive: false,
                 action: onOpenWelcomeTour
+            )
+
+            menuRow(
+                title: "Check for Updates...",
+                icon: "arrow.triangle.2.circlepath",
+                shortcut: "",
+                isActive: false,
+                action: onCheckForUpdates
             )
 
             menuRow(
@@ -285,11 +296,19 @@ public struct WelcomeTourView: View {
         VStack(spacing: 22) {
             Spacer()
 
-            Image(systemName: step.systemImage)
-                .font(.system(size: 56, weight: .semibold))
-                .foregroundStyle(.purple)
-                .frame(width: 96, height: 96)
-                .background(Color.purple.opacity(0.14), in: RoundedRectangle(cornerRadius: 24))
+            if step.id == 0, let icon = SettingsView.appIconImage() {
+                Image(nsImage: icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 104, height: 104)
+            } else {
+                Image(systemName: step.systemImage)
+                    .font(.system(size: 56, weight: .semibold))
+                    .foregroundStyle(.purple)
+                    .frame(width: 96, height: 96)
+                    .background(Color.purple.opacity(0.14), in: RoundedRectangle(cornerRadius: 24))
+            }
 
             Text(step.title)
                 .font(.system(size: 22, weight: .bold))
