@@ -449,7 +449,7 @@ public struct SettingsView: View {
             Text("ScreenEditing")
                 .font(.system(size: 22, weight: .bold))
 
-            Text(Self.appVersionText)
+            Text("Version \(appUpdater.currentVersion) (Build 68)")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
 

@@ -122,11 +122,10 @@ public final class AppUpdater: ObservableObject {
         let bundleID = Bundle.main.bundleIdentifier
         let isAppBundle = bundleID == "com.screenediting.app" || bundleID == "com.softal.presentify"
         guard isAppBundle,
-              let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-              !version.isEmpty else {
+              let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else {
             return "8.1.2"
         }
-        return version
+        return version.isEmpty ? "8.1.2" : version
     }
 
     public static func isVersion(_ candidate: String, newerThan current: String) -> Bool {
@@ -153,14 +152,12 @@ public final class AppUpdater: ObservableObject {
     }
 
     public static func validatedZipAssetURL(in assets: [ReleaseAssetInfo]) -> URL? {
-        for asset in assets {
-            guard asset.name.lowercased().hasSuffix(".zip"),
-                  let url = URL(string: asset.browserDownloadURL),
-                  let scheme = url.scheme?.lowercased(),
+        for asset in assets where asset.name.lowercased().hasSuffix(".zip") {
+            guard let url = URL(string: asset.browserDownloadURL),
                   let host = url.host?.lowercased() else {
                 continue
             }
-            let isHTTPS = scheme == "https"
+            let isHTTPS = url.scheme?.lowercased() == "https"
             let isAllowedHost = allowedDownloadHosts.contains(host)
             if isHTTPS && isAllowedHost {
                 return url
@@ -170,16 +167,13 @@ public final class AppUpdater: ObservableObject {
     }
 
     public static func validatedAPIAssetURL(in assets: [ReleaseAssetInfo]) -> URL? {
-        for asset in assets {
-            guard asset.name.lowercased().hasSuffix(".zip"),
-                  let rawAPI = asset.apiURL,
-                  let url = URL(string: rawAPI),
-                  let scheme = url.scheme?.lowercased(),
-                  let host = url.host?.lowercased() else {
+        for asset in assets where asset.name.lowercased().hasSuffix(".zip") {
+            guard let rawAPI = asset.apiURL,
+                  let url = URL(string: rawAPI) else {
                 continue
             }
-            let isHTTPS = scheme == "https"
-            let isGitHubAPI = host == "api.github.com"
+            let isHTTPS = url.scheme?.lowercased() == "https"
+            let isGitHubAPI = url.host?.lowercased() == "api.github.com"
             if isHTTPS && isGitHubAPI {
                 return url
             }
@@ -329,9 +323,9 @@ public final class AppUpdater: ObservableObject {
         let downloadTargetURL: URL
         var useOctetStreamAccept = false
 
-        if let token, !token.isEmpty, let apiURL = Self.validatedAPIAssetURL(in: release.assets) {
+        if let token, let apiURL = Self.validatedAPIAssetURL(in: release.assets) {
             downloadTargetURL = apiURL
-            useOctetStreamAccept = true
+            useOctetStreamAccept = !token.isEmpty
         } else if let zipURL = Self.validatedZipAssetURL(in: release.assets) {
             downloadTargetURL = zipURL
         } else {
@@ -350,7 +344,13 @@ public final class AppUpdater: ObservableObject {
             request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
         }
 
-        URLSession.shared.downloadTask(with: request) { [weak self] tempLocalURL, response, error in
+        let session = URLSession(
+            configuration: .ephemeral,
+            delegate: RedirectStrippingSessionDelegate(allowedHosts: Self.allowedDownloadHosts),
+            delegateQueue: nil
+        )
+        session.downloadTask(with: request) { [weak self] tempLocalURL, response, error in
+            defer { session.finishTasksAndInvalidate() }
             guard let self else { return }
             if let error {
                 DispatchQueue.main.async {
@@ -589,5 +589,39 @@ public struct UpdateNotificationView: View {
                 .buttonStyle(.borderedProminent)
             }
         }
+    }
+}
+
+private final class RedirectStrippingSessionDelegate: NSObject, URLSessionTaskDelegate {
+    private let allowedHosts: Set<String>
+
+    init(allowedHosts: Set<String>) {
+        self.allowedHosts = allowedHosts
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let url = request.url,
+              let host = url.host?.lowercased() else {
+            completionHandler(nil)
+            return
+        }
+        let isHTTPS = url.scheme?.lowercased() == "https"
+        let isAllowedHost = allowedHosts.contains(host)
+        guard isHTTPS && isAllowedHost else {
+            completionHandler(nil)
+            return
+        }
+        var modified = request
+        if host != "api.github.com" {
+            modified.setValue(nil, forHTTPHeaderField: "Authorization")
+            modified.setValue("*/*", forHTTPHeaderField: "Accept")
+        }
+        completionHandler(modified)
     }
 }
