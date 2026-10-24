@@ -13,6 +13,7 @@ public struct PresentifyMenuView: View {
     public var onOpenWelcomeTour: () -> Void
     public var onCheckForUpdates: () -> Void
     public var onQuit: () -> Void
+    @State private var hoveredRowTitle: String?
 
     public init(
         settings: AppSettings = .shared,
@@ -132,31 +133,48 @@ public struct PresentifyMenuView: View {
         isActive: Bool,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        let isHovered = hoveredRowTitle == title
+        return Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
-                    .frame(width: 18)
-                    .foregroundStyle(isActive ? SettingsView.themeBlue : SettingsView.themeLightBlue)
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 24, height: 24)
+                    .foregroundStyle(isActive ? Color.white : SettingsView.themeBlue)
+                    .background(
+                        isActive ? Color.white.opacity(0.22) : SettingsView.themeBlue.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    )
                 Text(title)
-                    .font(.system(size: 13, weight: isActive ? .semibold : .regular))
-                    .foregroundStyle(isActive ? SettingsView.themeBlue : Color.primary)
+                    .font(.system(size: 13, weight: isActive ? .semibold : .medium))
+                    .foregroundStyle(isActive ? Color.white : Color.primary)
                 Spacer()
                 if !shortcut.isEmpty {
                     Text(shortcut)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .foregroundStyle(isActive ? Color.white : SettingsView.themeBlue)
+                        .background(
+                            isActive ? Color.white.opacity(0.22) : SettingsView.themeBlue.opacity(0.10),
+                            in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        )
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(
-                isActive ? SettingsView.themeLightBlue.opacity(0.18) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 6)
+                isActive
+                    ? SettingsView.themeBlue
+                    : (isHovered ? SettingsView.themeBlue.opacity(0.10) : Color.clear),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
+        .onHover { hovering in
+            hoveredRowTitle = hovering ? title : (hoveredRowTitle == title ? nil : hoveredRowTitle)
+        }
     }
 }
 

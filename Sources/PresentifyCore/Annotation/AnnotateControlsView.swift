@@ -109,7 +109,7 @@ public struct ToastBannerView: View {
     public var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "sparkles")
-                .foregroundStyle(SettingsView.themeLightBlue)
+                .foregroundStyle(SettingsView.themeBlue)
             Text(message)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.primary)
@@ -352,7 +352,7 @@ public struct AnnotateControlsView: View {
                 } label: {
                     Image(systemName: mode.systemImage)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(settings.currentDrawMode == mode ? Color.white : SettingsView.themeLightBlue)
+                        .foregroundStyle(settings.currentDrawMode == mode ? Color.white : Color.primary)
                         .frame(width: 30, height: 30)
                         .background(
                             settings.currentDrawMode == mode ? SettingsView.themeBlue : Color.clear,
@@ -499,7 +499,7 @@ public struct AnnotateControlsView: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(isActive ? Color.white : SettingsView.themeLightBlue)
+                .foregroundStyle(isActive ? Color.white : Color.primary)
                 .frame(width: 30, height: 30)
                 .background(
                     isActive ? SettingsView.themeBlue : Color.clear,

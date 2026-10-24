@@ -16,7 +16,7 @@
   - `Shortcuts/`: `ShortcutManager` with 32 configurable global, annotation, and cursor shortcuts backed by Carbon `RegisterEventHotKey`.
   - `Annotation/`: `AnnotateOverlayController`, `AnnotatePanel`, `AnnotateCanvasView`, `AnnotateControlsView`, `AnnotateShortcutsView`, `ToastWindowController`, and `Screenshotter`.
   - `Cursor/`: `CursorHighlightWindowController`, `CursorSpotlightWindowController`, `CursorZoomWindowController`, and `ScreenCaptureManager`.
-  - `UI/`: 6-tab `SettingsView` (`General`, `Annotate`, `Cursor`, `Shortcuts`, `Other apps`, `About`), `PresentifyMenuView`, `PresentifyDockMenuController`, and 6-page `WelcomeTourView`.
+  - `UI/`: 5-tab `SettingsView` (`General`, `Annotate`, `Cursor`, `Shortcuts`, `About`), `PresentifyMenuView`, `PresentifyDockMenuController`, and 6-page `WelcomeTourView`.
   - `Updater/`: `AppUpdater` and `UpdateNotificationView` for automatic GitHub release checks and one-click in-app updates.
   - `App/`: `PresentifyAppController`.
 - **`Sources/Presentify`**: Executable entry point launching `NSApplication` with `PresentifyAppController`.

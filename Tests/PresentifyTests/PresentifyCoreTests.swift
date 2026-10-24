@@ -509,7 +509,7 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(WelcomeTourView.pages.count, 6)
         XCTAssertEqual(WelcomeTourView.pages.first?.title, "Welcome to ScreenEditing")
         XCTAssertEqual(SettingsView.appVersionText, "Version 8.1.2 (Build 68)")
-        XCTAssertEqual(SettingsView.copyrightText, "© Softal.io. All rights reserved.")
+        XCTAssertEqual(SettingsView.copyrightText, "© Châu Minh Phúc. All rights reserved.")
         XCTAssertNotNil(SettingsView.appIconImage())
         XCTAssertEqual(AppSettings.defaultHighlightColor, .blue)
 

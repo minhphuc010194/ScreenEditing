@@ -133,7 +133,6 @@ public enum SettingsTab: String, Codable, CaseIterable, Identifiable, Sendable {
     case annotation
     case cursorHighlight
     case shortcuts
-    case otherApps
     case about
 
     public var id: String { rawValue }
@@ -144,7 +143,6 @@ public enum SettingsTab: String, Codable, CaseIterable, Identifiable, Sendable {
         case .annotation: return "Annotate"
         case .cursorHighlight: return "Cursor"
         case .shortcuts: return "Shortcuts"
-        case .otherApps: return "Other Apps"
         case .about: return "About"
         }
     }
@@ -155,7 +153,6 @@ public enum SettingsTab: String, Codable, CaseIterable, Identifiable, Sendable {
         case .annotation: return "pencil.tip.crop.circle"
         case .cursorHighlight: return "cursorarrow.rays"
         case .shortcuts: return "command"
-        case .otherApps: return "square.grid.2x2"
         case .about: return "info.circle"
         }
     }

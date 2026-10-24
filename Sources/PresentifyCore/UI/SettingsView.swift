@@ -41,8 +41,10 @@ public struct ShortcutRecorderRow: View {
                         isRecording ? SettingsView.themeBlue.opacity(0.22) : SettingsView.themeLightBlue.opacity(0.14),
                         in: RoundedRectangle(cornerRadius: 6)
                     )
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .contentShape(Rectangle())
 
             Button {
                 stopRecording()
@@ -51,8 +53,11 @@ public struct ShortcutRecorderRow: View {
                 Image(systemName: "arrow.counterclockwise")
                     .font(.system(size: 11))
                     .foregroundStyle(SettingsView.themeBlue)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .contentShape(Rectangle())
             .help("Reset to Default")
         }
         .padding(.vertical, 2)
@@ -95,9 +100,10 @@ public struct SettingsView: View {
     public var onOpenWelcomeTour: () -> Void
 
     @State private var isShowingRestoreAlert = false
+    @State private var hoveredTab: SettingsTab?
 
     public static let appVersionText = "Version 8.1.2 (Build 68)"
-    public static let copyrightText = "© Softal.io. All rights reserved."
+    public static let copyrightText = "© Châu Minh Phúc. All rights reserved."
     public static let themeBlue = Color(red: 0.08, green: 0.52, blue: 0.98)
     public static let themeLightBlue = Color(red: 0.38, green: 0.78, blue: 1.0)
     public static let themeGradient = LinearGradient(
@@ -142,8 +148,6 @@ public struct SettingsView: View {
                         cursorTabContent
                     case .shortcuts:
                         shortcutsTabContent
-                    case .otherApps:
-                        otherAppsTabContent
                     case .about:
                         aboutTabContent
                     }
@@ -167,23 +171,32 @@ public struct SettingsView: View {
     private var tabBarHeader: some View {
         HStack(spacing: 12) {
             ForEach(SettingsTab.allCases) { tab in
+                let isSelected = settings.selectedSettingsTab == tab
+                let isHovered = hoveredTab == tab
                 Button {
                     settings.selectedSettingsTab = tab
                 } label: {
                     VStack(spacing: 4) {
                         Image(systemName: tab.systemImage)
                             .font(.system(size: 18))
-                        Text(tab == .otherApps ? "Other apps" : tab.title)
+                        Text(tab.title)
                             .font(.system(size: 11, weight: .medium))
                     }
                     .frame(width: 82, height: 52)
-                    .foregroundStyle(settings.selectedSettingsTab == tab ? Self.themeBlue : Color.secondary)
+                    .foregroundStyle(isSelected ? Self.themeBlue : (isHovered ? Color.primary : Color.secondary))
                     .background(
-                        settings.selectedSettingsTab == tab ? Self.themeLightBlue.opacity(0.18) : Color.clear,
+                        isSelected
+                            ? Self.themeLightBlue.opacity(0.18)
+                            : (isHovered ? Self.themeBlue.opacity(0.08) : Color.clear),
                         in: RoundedRectangle(cornerRadius: 8)
                     )
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    hoveredTab = hovering ? tab : (hoveredTab == tab ? nil : hoveredTab)
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -407,27 +420,6 @@ public struct SettingsView: View {
         }
     }
 
-    private var otherAppsTabContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("More Apps by Softal.io")
-                .font(.system(size: 16, weight: .bold))
-
-            otherAppCard(
-                name: "FaceScreen",
-                subtitle: "Floating webcam overlay right on your screen for engaging presentations and recordings.",
-                icon: "web.camera.fill",
-                url: "https://facescreen.app"
-            )
-
-            otherAppCard(
-                name: "KeyScreen",
-                subtitle: "Visualize every keystroke and shortcut live on your screen while teaching or demoing.",
-                icon: "keyboard.badge.eye",
-                url: "https://keyscreen.app"
-            )
-        }
-    }
-
     private var aboutTabContent: some View {
         VStack(spacing: 14) {
             if let icon = Self.appIconImage() {
@@ -463,34 +455,13 @@ public struct SettingsView: View {
 
             HStack(spacing: 14) {
                 Button("X (Twitter)") {
-                    SafeExternalLinks.openHTTPS("https://x.com/ram__patra")
+                    SafeExternalLinks.openHTTPS("https://x.com/ChauMinhPhuc")
                 }
                 Button("YouTube") {
-                    SafeExternalLinks.openHTTPS("https://youtube.com/@presentifyapp")
-                }
-                Button("Website") {
-                    SafeExternalLinks.openHTTPS("https://presentifyapp.com")
+                    SafeExternalLinks.openHTTPS("https://www.youtube.com/@BumLowkey")
                 }
             }
             .buttonStyle(.bordered)
-
-            Divider().padding(.vertical, 6)
-
-            HStack(spacing: 12) {
-                Button("FAQ") {
-                    SafeExternalLinks.openHTTPS("https://presentifyapp.com/faq")
-                }
-                Button("Videos") {
-                    SafeExternalLinks.openHTTPS("https://presentifyapp.com/videos")
-                }
-                Button("Suggest Idea") {
-                    SafeExternalLinks.openHTTPS("https://presentify.canny.io")
-                }
-                Button("Write a review") {
-                    SafeExternalLinks.openHTTPS("https://apps.apple.com/app/id1507246666")
-                }
-            }
-            .buttonStyle(.link)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 16)
@@ -563,31 +534,6 @@ public struct SettingsView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
         }
-    }
-
-    private func otherAppCard(name: String, subtitle: String, icon: String, url: String) -> some View {
-        HStack(spacing: 16) {
-            Image(systemName: icon)
-                .font(.system(size: 30))
-                .foregroundStyle(Self.themeBlue)
-                .frame(width: 54, height: 54)
-                .background(Self.themeLightBlue.opacity(0.16), in: RoundedRectangle(cornerRadius: 12))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(name)
-                    .font(.system(size: 15, weight: .semibold))
-                Text(subtitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Learn More") {
-                SafeExternalLinks.openHTTPS(url)
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .padding(16)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func chooseScreenshotDirectory() {
