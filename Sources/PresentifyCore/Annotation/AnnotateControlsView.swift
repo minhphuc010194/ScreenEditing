@@ -14,13 +14,13 @@ public final class FloatingControlPanel: NSPanel {
         self.isOpaque = false
         self.backgroundColor = .clear
         self.hasShadow = true
-        self.becomesKeyOnlyIfNeeded = false
+        self.becomesKeyOnlyIfNeeded = true
         self.isMovableByWindowBackground = false
         self.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
     }
 
-    override public var canBecomeKey: Bool { true }
+    override public var canBecomeKey: Bool { false }
     override public var canBecomeMain: Bool { false }
 
     override public func keyDown(with event: NSEvent) {
@@ -169,7 +169,9 @@ public final class ToastWindowController {
 
 public struct AnnotateControlsView: View {
     @ObservedObject public var settings: AppSettings
-    @ObservedObject public var canvasState: AnnotationCanvasState
+    public let canvasState: AnnotationCanvasState?
+    public var onUndo: () -> Void
+    public var onRedo: () -> Void
     public var onSaveScreenshot: () -> Void
     public var onClear: () -> Void
     public var onToggleShortcuts: () -> Void
@@ -180,7 +182,9 @@ public struct AnnotateControlsView: View {
 
     public init(
         settings: AppSettings,
-        canvasState: AnnotationCanvasState,
+        canvasState: AnnotationCanvasState? = nil,
+        onUndo: @escaping () -> Void = {},
+        onRedo: @escaping () -> Void = {},
         onSaveScreenshot: @escaping () -> Void = {},
         onClear: @escaping () -> Void = {},
         onToggleShortcuts: @escaping () -> Void = {},
@@ -189,6 +193,8 @@ public struct AnnotateControlsView: View {
     ) {
         self.settings = settings
         self.canvasState = canvasState
+        self.onUndo = onUndo
+        self.onRedo = onRedo
         self.onSaveScreenshot = onSaveScreenshot
         self.onClear = onClear
         self.onToggleShortcuts = onToggleShortcuts
@@ -372,6 +378,36 @@ public struct AnnotateControlsView: View {
             ) {
                 settings.isTouchDrawActive.toggle()
             }
+
+            Button {
+                if let canvasState {
+                    canvasState.undo()
+                } else {
+                    onUndo()
+                }
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+            .help("Undo (⌘Z)")
+
+            Button {
+                if let canvasState {
+                    canvasState.redo()
+                } else {
+                    onRedo()
+                }
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+            .help("Redo (⌘⇧Z)")
 
             Button(action: onSaveScreenshot) {
                 Image(systemName: "camera")

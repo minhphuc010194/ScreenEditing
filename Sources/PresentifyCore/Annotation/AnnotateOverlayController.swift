@@ -22,6 +22,14 @@ public final class AnnotatePanel: NSPanel {
     override public var canBecomeKey: Bool { true }
     override public var canBecomeMain: Bool { false }
 
+    override public func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let canvas = contentView as? AnnotateCanvasView,
+           canvas.handleKeyCommand(keyCode: event.keyCode, modifiers: event.modifierFlags.rawValue) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     public func updateBackground(from settings: AppSettings) {
         if settings.isWhiteboardActive {
             backgroundColor = settings.annotateWhiteboardColor.nsColor.withAlphaComponent(CGFloat(settings.whiteboardOpacity))
@@ -40,8 +48,8 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     public var onRequestSaveScreenshot: (() -> Void)?
     public var onRequestCopyScreenshot: (() -> Void)?
     public var onRequestClose: (() -> Void)?
+    public var onRequestOpenSettings: (() -> Void)?
     public var onLineWeightChanged: ((Double) -> Void)?
-    public var onCanvasInteraction: (() -> Void)?
     public var exclusionScreenRectsProvider: (() -> [NSRect])?
 
     public private(set) var cursorLocation: CGPoint?
@@ -86,6 +94,10 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
     override public var acceptsFirstResponder: Bool { true }
 
+    override public func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override public func hitTest(_ point: NSPoint) -> NSView? {
         if let window, let rects = exclusionScreenRectsProvider?(), !rects.isEmpty {
             let windowPoint = superview?.convert(point, to: nil) ?? point
@@ -122,7 +134,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     override public func mouseDown(with event: NSEvent) {
-        onCanvasInteraction?()
         let point = convert(event.locationInWindow, from: nil)
         cursorLocation = point
         commitActiveTextEditing()
@@ -199,6 +210,23 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             return
         }
 
+        let hasNoDraft = canvasState.activeDraft == nil
+        let isStrokeMode = !flags.contains(.command) && settings.currentDrawMode != .text
+        if hasNoDraft && isStrokeMode {
+            let effectiveAutoErase = flags.contains(.control) ? !settings.autoEraseEnabled : settings.autoEraseEnabled
+            canvasState.beginStroke(
+                at: point,
+                mode: settings.currentDrawMode,
+                color: settings.activeStrokeColor,
+                gradient: settings.activeStrokeGradient,
+                lineWeight: settings.lineWeight,
+                isHighlighter: settings.currentDrawMode == .highlighter,
+                isAutoErase: effectiveAutoErase,
+                isShiftDown: flags.contains(.shift),
+                isOptionDown: flags.contains(.option)
+            )
+        }
+
         canvasState.updateStroke(
             to: point,
             isShiftDown: flags.contains(.shift),
@@ -216,7 +244,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isMarqueeSelecting = false
             canvasState.selectionRectangle = nil
             needsDisplay = true
-            onCanvasInteraction?()
             return
         }
 
@@ -227,7 +254,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         )
         canvasState.finishStroke()
         needsDisplay = true
-        onCanvasInteraction?()
     }
 
     override public func touchesBegan(with event: NSEvent) {
@@ -268,11 +294,28 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
+    override public func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if handleKeyCommand(keyCode: event.keyCode, modifiers: event.modifierFlags.rawValue) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override public func keyDown(with event: NSEvent) {
         if handleKeyCommand(keyCode: event.keyCode, modifiers: event.modifierFlags.rawValue) {
             return
         }
         super.keyDown(with: event)
+    }
+
+    @objc public func undo(_ sender: Any?) {
+        canvasState.undo()
+        needsDisplay = true
+    }
+
+    @objc public func redo(_ sender: Any?) {
+        canvasState.redo()
+        needsDisplay = true
     }
 
     @discardableResult
@@ -288,15 +331,46 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             return true
         }
 
-        guard activeTextField == nil else { return false }
-
         let normMods = modifiers & KeyBinding.relevantModifiersMask
-        if normMods == KeyBinding.commandMask && keyCode == 0x06 {
-            canvasState.undo()
+        if normMods == KeyBinding.commandMask && keyCode == 0x0C {
+            NSApp.terminate(nil)
             return true
         }
-        if normMods == (KeyBinding.commandMask | KeyBinding.shiftMask) && keyCode == 0x06 {
+        if normMods == KeyBinding.commandMask && keyCode == 0x2B {
+            onRequestOpenSettings?()
+            return true
+        }
+
+        guard activeTextField == nil else { return false }
+
+        if normMods == KeyBinding.commandMask && keyCode == 0x06 {
+            canvasState.undo()
+            needsDisplay = true
+            return true
+        }
+        if (normMods == (KeyBinding.commandMask | KeyBinding.shiftMask) && keyCode == 0x06)
+            || (normMods == KeyBinding.commandMask && keyCode == 0x10) {
             canvasState.redo()
+            needsDisplay = true
+            return true
+        }
+        if normMods == KeyBinding.commandMask && keyCode == 0x00 {
+            canvasState.selectedIDs = Set(canvasState.annotations.map(\.id))
+            needsDisplay = true
+            return true
+        }
+        if normMods == KeyBinding.commandMask && keyCode == 0x01 {
+            onRequestSaveScreenshot?()
+            return true
+        }
+        if normMods == 0 && keyCode == 0x75 {
+            canvasState.deleteSelectedOrClearAll()
+            needsDisplay = true
+            return true
+        }
+        if normMods == KeyBinding.shiftMask && keyCode == 0x2C {
+            settings.isShowingShortcutsCheatsheet.toggle()
+            needsDisplay = true
             return true
         }
 
@@ -609,9 +683,11 @@ public final class AnnotateOverlayController {
     public private(set) var canvasView: AnnotateCanvasView?
     public private(set) var controlsPanel: FloatingControlPanel?
     public private(set) var shortcutsPanel: FloatingControlPanel?
+    public var onRequestOpenSettings: (() -> Void)?
 
     private var autoEraseTimer: Timer?
     private var flagsMonitor: Any?
+    private var keyDownMonitor: Any?
     private var cancellables: Set<AnyCancellable> = []
     private static let savedSessionKey = "presentify.savedAnnotationSession"
 
@@ -646,8 +722,13 @@ public final class AnnotateOverlayController {
     }
 
     public func toggleAnnotateControls() {
-        settings.showAnnotateControls.toggle()
-        updateAuxiliaryPanels()
+        if !settings.isAnnotating {
+            settings.showAnnotateControls = true
+            showAnnotation()
+        } else {
+            settings.showAnnotateControls.toggle()
+            updateAuxiliaryPanels()
+        }
     }
 
     public func showAnnotation() {
@@ -663,11 +744,9 @@ public final class AnnotateOverlayController {
             view.onRequestSaveScreenshot = { [weak self] in self?.saveScreenshot() }
             view.onRequestCopyScreenshot = { [weak self] in self?.copyScreenshot() }
             view.onRequestClose = { [weak self] in self?.hideAnnotation() }
+            view.onRequestOpenSettings = { [weak self] in self?.onRequestOpenSettings?() }
             view.onLineWeightChanged = { [weak self] weight in
                 self?.toastController.showToast(.lineWeight, message: "Line Weight: \(Int(weight)) pt")
-            }
-            view.onCanvasInteraction = { [weak self] in
-                self?.keepAuxiliaryPanelsAboveCanvas()
             }
             view.exclusionScreenRectsProvider = { [weak self] in
                 self?.visibleAuxiliaryPanelRects() ?? []
@@ -681,6 +760,7 @@ public final class AnnotateOverlayController {
         canvasView?.frame = NSRect(origin: .zero, size: screenFrame.size)
         panel?.updateBackground(from: settings)
         updateInteractivePassThrough(modifierFlags: NSEvent.modifierFlags)
+        NSApp.activate(ignoringOtherApps: true)
         panel?.makeKeyAndOrderFront(nil)
         panel?.makeFirstResponder(canvasView)
 
@@ -705,12 +785,6 @@ public final class AnnotateOverlayController {
         }
 
         stopTimersAndMonitors()
-        if let controlsPanel, let parent = controlsPanel.parent {
-            parent.removeChildWindow(controlsPanel)
-        }
-        if let shortcutsPanel, let parent = shortcutsPanel.parent {
-            parent.removeChildWindow(shortcutsPanel)
-        }
         controlsPanel?.orderOut(nil)
         shortcutsPanel?.orderOut(nil)
         panel?.orderOut(nil)
@@ -757,25 +831,19 @@ public final class AnnotateOverlayController {
         return rects
     }
 
-    private func keepAuxiliaryPanelsAboveCanvas() {
-        let elevatedLevel = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
-        if settings.showAnnotateControls, let controlsPanel {
-            if controlsPanel.parent == nil, let panel {
-                panel.addChildWindow(controlsPanel, ordered: .above)
-            }
-            controlsPanel.level = elevatedLevel
-            controlsPanel.orderFrontRegardless()
-        }
-        if settings.isShowingShortcutsCheatsheet, let shortcutsPanel {
-            if shortcutsPanel.parent == nil, let panel {
-                panel.addChildWindow(shortcutsPanel, ordered: .above)
-            }
-            shortcutsPanel.level = elevatedLevel
-            shortcutsPanel.orderFrontRegardless()
-        }
-    }
-
     private func bindSettings() {
+        settings.$currentDrawMode
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.settings.isAnnotating else { return }
+                self.canvasView?.commitActiveTextEditing()
+                self.panel?.makeKey()
+                self.panel?.makeFirstResponder(self.canvasView)
+                self.canvasView?.needsDisplay = true
+            }
+            .store(in: &cancellables)
+
         settings.$whiteboardEnabled
             .combineLatest(settings.$whiteboardColor, settings.$dimScreenOnAnnotate)
             .receive(on: RunLoop.main)
@@ -803,12 +871,6 @@ public final class AnnotateOverlayController {
 
     private func updateAuxiliaryPanels() {
         guard settings.isAnnotating else {
-            if let controlsPanel, let parent = controlsPanel.parent {
-                parent.removeChildWindow(controlsPanel)
-            }
-            if let shortcutsPanel, let parent = shortcutsPanel.parent {
-                parent.removeChildWindow(shortcutsPanel)
-            }
             controlsPanel?.orderOut(nil)
             shortcutsPanel?.orderOut(nil)
             return
@@ -818,7 +880,8 @@ public final class AnnotateOverlayController {
             if controlsPanel == nil {
                 let toolbarView = AnnotateControlsView(
                     settings: settings,
-                    canvasState: canvasState,
+                    onUndo: { [weak self] in self?.canvasState.undo() },
+                    onRedo: { [weak self] in self?.canvasState.redo() },
                     onSaveScreenshot: { [weak self] in _ = self?.saveScreenshot() },
                     onClear: { [weak self] in self?.canvasState.clearAll() },
                     onToggleShortcuts: { [weak self] in self?.settings.isShowingShortcutsCheatsheet.toggle() },
@@ -835,7 +898,7 @@ public final class AnnotateOverlayController {
                     }
                 )
                 let hosting = FirstMouseHostingView(rootView: toolbarView)
-                hosting.frame = NSRect(x: 0, y: 0, width: 690, height: 54)
+                hosting.frame = NSRect(x: 0, y: 0, width: 760, height: 54)
                 let cPanel = FloatingControlPanel(contentRect: hosting.frame)
                 cPanel.onKeyDown = { [weak self] event in
                     self?.canvasView?.handleKeyCommand(
@@ -845,21 +908,13 @@ public final class AnnotateOverlayController {
                 }
                 cPanel.contentView = hosting
                 if let visible = NSScreen.main?.visibleFrame {
-                    cPanel.setFrameOrigin(NSPoint(x: visible.midX - 345, y: visible.minY + 36))
+                    cPanel.setFrameOrigin(NSPoint(x: visible.midX - 380, y: visible.minY + 36))
                 }
                 controlsPanel = cPanel
             }
-            if let controlsPanel {
-                if controlsPanel.parent == nil, let panel {
-                    panel.addChildWindow(controlsPanel, ordered: .above)
-                }
-                controlsPanel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
-                controlsPanel.orderFrontRegardless()
-            }
+            controlsPanel?.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
+            controlsPanel?.orderFrontRegardless()
         } else {
-            if let controlsPanel, let parent = controlsPanel.parent {
-                parent.removeChildWindow(controlsPanel)
-            }
             controlsPanel?.orderOut(nil)
         }
 
@@ -884,17 +939,9 @@ public final class AnnotateOverlayController {
                 }
                 shortcutsPanel = sPanel
             }
-            if let shortcutsPanel {
-                if shortcutsPanel.parent == nil, let panel {
-                    panel.addChildWindow(shortcutsPanel, ordered: .above)
-                }
-                shortcutsPanel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
-                shortcutsPanel.orderFrontRegardless()
-            }
+            shortcutsPanel?.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
+            shortcutsPanel?.orderFrontRegardless()
         } else {
-            if let shortcutsPanel, let parent = shortcutsPanel.parent {
-                parent.removeChildWindow(shortcutsPanel)
-            }
             shortcutsPanel?.orderOut(nil)
         }
     }
@@ -909,6 +956,19 @@ public final class AnnotateOverlayController {
             self?.updateInteractivePassThrough(modifierFlags: event.modifierFlags)
             return event
         }
+        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.settings.isAnnotating else { return event }
+            if self.canvasView?.activeTextField != nil, event.keyCode != 0x35 {
+                return event
+            }
+            if self.canvasView?.handleKeyCommand(
+                keyCode: event.keyCode,
+                modifiers: event.modifierFlags.rawValue
+            ) == true {
+                return nil
+            }
+            return event
+        }
     }
 
     private func stopTimersAndMonitors() {
@@ -917,6 +977,10 @@ public final class AnnotateOverlayController {
         if let monitor = flagsMonitor {
             NSEvent.removeMonitor(monitor)
             flagsMonitor = nil
+        }
+        if let monitor = keyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyDownMonitor = nil
         }
     }
 }

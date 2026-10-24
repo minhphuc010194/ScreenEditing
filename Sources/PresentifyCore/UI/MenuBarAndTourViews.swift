@@ -51,7 +51,7 @@ public struct PresentifyMenuView: View {
                 title: "Annotate Controls",
                 icon: "slider.horizontal.below.rectangle",
                 shortcut: shortcutManager.binding(for: .toggleAnnotateControls).displayString,
-                isActive: settings.showAnnotateControls,
+                isActive: settings.isAnnotating && settings.showAnnotateControls,
                 action: onToggleAnnotateControls
             )
 

@@ -301,8 +301,7 @@ final class PresentifyCoreTests: XCTestCase {
         if let panel = overlay.panel, let controlsPanel = overlay.controlsPanel {
             XCTAssertGreaterThan(controlsPanel.level.rawValue, panel.level.rawValue)
             XCTAssertFalse(controlsPanel.isMovableByWindowBackground)
-            XCTAssertTrue(controlsPanel.canBecomeKey)
-            XCTAssertEqual(controlsPanel.parent, panel)
+            XCTAssertFalse(controlsPanel.canBecomeKey)
         }
 
         settings.annotateInteractiveMode = true
@@ -316,6 +315,7 @@ final class PresentifyCoreTests: XCTestCase {
             XCTFail("Expected canvasView to be initialized")
             return
         }
+        XCTAssertTrue(canvasView.acceptsFirstMouse(for: nil))
 
         settings.selectOrToggleDrawMode(.arrow)
         XCTAssertEqual(settings.currentDrawMode, .arrow)
@@ -356,7 +356,74 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(canvasView.activeTextField?.placeholderString, "Type something...")
         canvasView.activeTextField?.stringValue = "Hello Screen"
         canvasView.commitActiveTextEditing()
+        XCTAssertEqual(overlay.canvasState.annotations.count, 1)
         XCTAssertEqual(overlay.canvasState.annotations.last?.text, "Hello Screen")
+
+        if let undoEvent = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "z",
+            charactersIgnoringModifiers: "z",
+            isARepeat: false,
+            keyCode: 0x06
+        ) {
+            XCTAssertTrue(canvasView.performKeyEquivalent(with: undoEvent))
+            XCTAssertEqual(overlay.canvasState.annotations.count, 0)
+        }
+
+        if let redoEvent = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command, .shift],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "Z",
+            charactersIgnoringModifiers: "z",
+            isARepeat: false,
+            keyCode: 0x06
+        ) {
+            XCTAssertTrue(canvasView.performKeyEquivalent(with: redoEvent))
+            XCTAssertEqual(overlay.canvasState.annotations.count, 1)
+        }
+
+        if let undoAgainEvent = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "z",
+            charactersIgnoringModifiers: "z",
+            isARepeat: false,
+            keyCode: 0x06
+        ) {
+            XCTAssertTrue(canvasView.performKeyEquivalent(with: undoAgainEvent))
+            XCTAssertEqual(overlay.canvasState.annotations.count, 0)
+        }
+
+        XCTAssertTrue(canvasView.handleKeyCommand(keyCode: 0x10, modifiers: KeyBinding.commandMask))
+        XCTAssertEqual(overlay.canvasState.annotations.count, 1)
+
+        XCTAssertTrue(canvasView.handleKeyCommand(keyCode: 0x00, modifiers: KeyBinding.commandMask))
+        XCTAssertEqual(overlay.canvasState.selectedIDs.count, 1)
+
+        var didSaveScreenshotViaCmdS = false
+        canvasView.onRequestSaveScreenshot = { didSaveScreenshotViaCmdS = true }
+        XCTAssertTrue(canvasView.handleKeyCommand(keyCode: 0x01, modifiers: KeyBinding.commandMask))
+        XCTAssertTrue(didSaveScreenshotViaCmdS)
+
+        XCTAssertFalse(settings.isShowingShortcutsCheatsheet)
+        XCTAssertTrue(canvasView.handleKeyCommand(keyCode: 0x2C, modifiers: KeyBinding.shiftMask))
+        XCTAssertTrue(settings.isShowingShortcutsCheatsheet)
+
+        XCTAssertTrue(canvasView.handleKeyCommand(keyCode: 0x75, modifiers: 0))
+        XCTAssertEqual(overlay.canvasState.annotations.count, 0)
 
         let toast = overlay.toastController
         toast.showToast(.touchDraw, message: "Touch Draw On", autoDismissAfter: 0)
@@ -380,6 +447,12 @@ final class PresentifyCoreTests: XCTestCase {
 
         overlay.hideAnnotation()
         XCTAssertFalse(settings.isAnnotating)
+
+        settings.showAnnotateControls = false
+        overlay.toggleAnnotateControls()
+        XCTAssertTrue(settings.isAnnotating)
+        XCTAssertTrue(settings.showAnnotateControls)
+        overlay.hideAnnotation()
     }
 
     func testCursorControllersAndAppControllerRouting() {
@@ -387,13 +460,24 @@ final class PresentifyCoreTests: XCTestCase {
         let shortcuts = ShortcutManager(defaults: testDefaults)
         let appController = PresentifyAppController(settings: settings, shortcutManager: shortcuts)
 
+        appController.setupMainMenu()
+        if let mainMenu = NSApp?.mainMenu,
+           let appSubmenu = mainMenu.items.first?.submenu {
+            XCTAssertTrue(appSubmenu.items.contains(where: { $0.keyEquivalent == "q" }))
+            XCTAssertTrue(appSubmenu.items.contains(where: { $0.keyEquivalent == "," }))
+        }
+
         appController.handleGlobalShortcut(.toggleHighlightCursor)
         XCTAssertTrue(settings.isHighlightingCursor)
         appController.highlightController.simulateClickDown()
         XCTAssertEqual(appController.highlightController.highlightView?.isMousePressed, true)
         appController.highlightController.simulateClickUp()
         XCTAssertEqual(appController.highlightController.highlightView?.isMousePressed, false)
-        appController.handleGlobalShortcut(.toggleHighlightCursor)
+
+        let initialHighlightSize = settings.cursorHighlightSize
+        XCTAssertTrue(appController.handleAppKeyDown(keyCode: 0x18, modifiers: 0))
+        XCTAssertGreaterThan(settings.cursorHighlightSize, initialHighlightSize)
+        XCTAssertTrue(appController.handleAppKeyDown(keyCode: 0x35, modifiers: 0))
         XCTAssertFalse(settings.isHighlightingCursor)
 
         appController.handleGlobalShortcut(.toggleSpotlightCursor)
@@ -414,6 +498,11 @@ final class PresentifyCoreTests: XCTestCase {
         appController.handleGlobalShortcut(.toggleZoomCursor)
         XCTAssertFalse(settings.isZoomingCursor)
 
+        appController.annotateController.showAnnotation()
+        XCTAssertTrue(settings.isAnnotating)
+        XCTAssertTrue(appController.handleAppKeyDown(keyCode: 0x0D, modifiers: KeyBinding.commandMask))
+        XCTAssertFalse(settings.isAnnotating)
+
         let dockMenu = appController.dockMenuController.buildDockMenu()
         XCTAssertEqual(dockMenu.title, "ScreenEditing")
         XCTAssertGreaterThanOrEqual(dockMenu.items.count, 5)
@@ -423,6 +512,10 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(SettingsView.copyrightText, "© Softal.io. All rights reserved.")
 
         XCTAssertNil(appController.settingsWindow)
+        XCTAssertTrue(appController.handleAppKeyDown(keyCode: 0x2B, modifiers: KeyBinding.commandMask))
+        XCTAssertNotNil(appController.settingsWindow)
+        appController.settingsWindow?.close()
+
         XCTAssertTrue(appController.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false))
         XCTAssertNotNil(appController.settingsWindow)
         appController.settingsWindow?.close()
