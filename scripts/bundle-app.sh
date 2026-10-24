@@ -23,6 +23,10 @@ cp -f "${ROOT_DIR}/Resources/Info.plist" "${CONTENTS_DIR}/Info.plist"
 cp -f "${ROOT_DIR}/Resources/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
 cp -f "${ROOT_DIR}/Resources/AppIcon.png" "${RESOURCES_DIR}/AppIcon.png"
 
+if [[ -n "${APP_VERSION:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" "${CONTENTS_DIR}/Info.plist"
+fi
+
 ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${ZIP_PATH}"
 
 echo "Built macOS app bundle at: ${APP_DIR}"

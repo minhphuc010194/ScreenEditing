@@ -6,17 +6,25 @@ import SwiftUI
 public struct ReleaseAssetInfo: Codable, Equatable, Sendable {
     public let name: String
     public let browserDownloadURL: String
+    public let apiURL: String?
     public let size: Int?
 
     enum CodingKeys: String, CodingKey {
         case name
         case browserDownloadURL = "browser_download_url"
+        case apiURL = "url"
         case size
     }
 
-    public init(name: String, browserDownloadURL: String, size: Int? = nil) {
+    public init(
+        name: String,
+        browserDownloadURL: String,
+        apiURL: String? = nil,
+        size: Int? = nil
+    ) {
         self.name = name
         self.browserDownloadURL = browserDownloadURL
+        self.apiURL = apiURL
         self.size = size
     }
 }
@@ -161,6 +169,57 @@ public final class AppUpdater: ObservableObject {
         return nil
     }
 
+    public static func validatedAPIAssetURL(in assets: [ReleaseAssetInfo]) -> URL? {
+        for asset in assets {
+            guard asset.name.lowercased().hasSuffix(".zip"),
+                  let rawAPI = asset.apiURL,
+                  let url = URL(string: rawAPI),
+                  let scheme = url.scheme?.lowercased(),
+                  let host = url.host?.lowercased() else {
+                continue
+            }
+            let isHTTPS = scheme == "https"
+            let isGitHubAPI = host == "api.github.com"
+            if isHTTPS && isGitHubAPI {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func resolveLocalGitHubToken() -> String? {
+        let env = ProcessInfo.processInfo.environment
+        if let envToken = env["GITHUB_TOKEN"] ?? env["GH_TOKEN"] {
+            let trimmed = envToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        let candidatePaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+        for path in candidatePaths where FileManager.default.isExecutableFile(atPath: path) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = ["auth", "token"]
+            let outPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationStatus == 0 {
+                    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    if let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !token.isEmpty {
+                        return token
+                    }
+                }
+            } catch {
+                continue
+            }
+        }
+        return nil
+    }
+
     public func startAutomaticChecks() {
         stopAutomaticChecks()
         guard settings.automaticallyCheckForUpdates else { return }
@@ -195,6 +254,9 @@ public final class AppUpdater: ObservableObject {
         var request = URLRequest(url: url, timeoutInterval: 15.0)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("ScreenEditing/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        if let token = Self.resolveLocalGitHubToken() {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
@@ -263,15 +325,30 @@ public final class AppUpdater: ObservableObject {
     }
 
     public func downloadAndInstall(release: GitHubReleaseInfo) {
-        guard let zipAssetURL = Self.validatedZipAssetURL(in: release.assets) else {
+        let token = Self.resolveLocalGitHubToken()
+        let downloadTargetURL: URL
+        var useOctetStreamAccept = false
+
+        if let token, !token.isEmpty, let apiURL = Self.validatedAPIAssetURL(in: release.assets) {
+            downloadTargetURL = apiURL
+            useOctetStreamAccept = true
+        } else if let zipURL = Self.validatedZipAssetURL(in: release.assets) {
+            downloadTargetURL = zipURL
+        } else {
             SafeExternalLinks.openHTTPS(release.htmlURL)
             status = .idle
             return
         }
 
         status = .downloading(progress: 0.15, version: release.tagName)
-        var request = URLRequest(url: zipAssetURL, timeoutInterval: 120.0)
+        var request = URLRequest(url: downloadTargetURL, timeoutInterval: 120.0)
         request.setValue("ScreenEditing/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        if let token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        if useOctetStreamAccept {
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+        }
 
         URLSession.shared.downloadTask(with: request) { [weak self] tempLocalURL, response, error in
             guard let self else { return }

@@ -1,0 +1,55 @@
+name: Build, Test & Auto-Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to publish (e.g. v8.2.0)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Swift tests
+        run: swift test
+
+  release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag_name != '')
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and package ScreenEditing.app.zip
+        env:
+          RAW_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          VERSION="${RAW_TAG#v}"
+          APP_VERSION="${VERSION}" bash scripts/bundle-app.sh
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          name: ScreenEditing ${{ inputs.tag_name || github.ref_name }}
+          files: build/ScreenEditing.app.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

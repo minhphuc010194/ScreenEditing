@@ -564,6 +564,7 @@ final class PresentifyCoreTests: XCTestCase {
           "assets": [
             {
               "name": "ScreenEditing.app.zip",
+              "url": "https://api.github.com/repos/minhphuc010194/ScreenEditing/releases/assets/12345",
               "browser_download_url": "https://github.com/minhphuc010194/ScreenEditing/releases/download/v9.0.0/ScreenEditing.app.zip",
               "size": 2048
             }
@@ -578,6 +579,14 @@ final class PresentifyCoreTests: XCTestCase {
         if case .updateAvailable(let release) = availableStatus {
             XCTAssertEqual(release.tagName, "v9.0.0")
             XCTAssertEqual(notifiedRelease?.tagName, "v9.0.0")
+            XCTAssertEqual(
+                release.assets.first?.apiURL,
+                "https://api.github.com/repos/minhphuc010194/ScreenEditing/releases/assets/12345"
+            )
+            XCTAssertEqual(
+                AppUpdater.validatedAPIAssetURL(in: release.assets)?.absoluteString,
+                "https://api.github.com/repos/minhphuc010194/ScreenEditing/releases/assets/12345"
+            )
             updater.skipRelease(release)
         } else {
             XCTFail("Expected updateAvailable status")

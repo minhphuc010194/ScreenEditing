@@ -17,6 +17,7 @@
   - `Annotation/`: `AnnotateOverlayController`, `AnnotatePanel`, `AnnotateCanvasView`, `AnnotateControlsView`, `AnnotateShortcutsView`, `ToastWindowController`, and `Screenshotter`.
   - `Cursor/`: `CursorHighlightWindowController`, `CursorSpotlightWindowController`, `CursorZoomWindowController`, and `ScreenCaptureManager`.
   - `UI/`: 6-tab `SettingsView` (`General`, `Annotate`, `Cursor`, `Shortcuts`, `Other apps`, `About`), `PresentifyMenuView`, `PresentifyDockMenuController`, and 6-page `WelcomeTourView`.
+  - `Updater/`: `AppUpdater` and `UpdateNotificationView` for automatic GitHub release checks and one-click in-app updates.
   - `App/`: `PresentifyAppController`.
 - **`Sources/Presentify`**: Executable entry point launching `NSApplication` with `PresentifyAppController`.
 
@@ -26,7 +27,15 @@
 swift build
 swift test
 swift build -c release
-bash scripts/bundle-app.sh
+bash scripts/bundle-app.sh --install
 ```
 
-Running `bash scripts/bundle-app.sh` produces the self-contained macOS application bundle at `build/ScreenEditing.app`.
+Running `bash scripts/bundle-app.sh --install` builds `build/ScreenEditing.app`, packages `build/ScreenEditing.app.zip`, and installs `/Applications/ScreenEditing.app`.
+
+## Automated GitHub Releases & In-App Updates
+
+Pushing a version tag triggers `.github/workflows/release.yml` on `macos-14` to run the test suite, stamp `CFBundleShortVersionString`, package `ScreenEditing.app.zip`, and publish a GitHub Release that existing `ScreenEditing.app` installations detect and install automatically:
+
+```bash
+git tag v8.2.0 && git push origin v8.2.0
+```
