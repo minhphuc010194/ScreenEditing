@@ -231,6 +231,24 @@ final class PresentifyCoreTests: XCTestCase {
         settings.increaseZoomLevel(step: 0.5)
         XCTAssertEqual(settings.zoomLevel, 2.5, accuracy: 1e-6)
 
+        settings.selectRandomColors()
+        XCTAssertTrue(settings.useRandomColors)
+        XCTAssertTrue(settings.enableGradients)
+        XCTAssertNotNil(settings.activeStrokeGradient)
+
+        settings.selectFavoriteColor(index: 2)
+        XCTAssertFalse(settings.useRandomColors)
+        XCTAssertFalse(settings.enableGradients)
+        XCTAssertNil(settings.activeStrokeGradient)
+        XCTAssertEqual(settings.activeStrokeColor, settings.favColors[2])
+
+        let customCyan = RGBColor(red: 0.1, green: 0.85, blue: 0.95)
+        settings.setCustomStrokeColor(customCyan)
+        XCTAssertFalse(settings.useRandomColors)
+        XCTAssertFalse(settings.enableGradients)
+        XCTAssertNil(settings.activeStrokeGradient)
+        XCTAssertEqual(settings.activeStrokeColor, customCyan)
+
         let reloaded = AppSettings(defaults: testDefaults)
         XCTAssertEqual(reloaded.lineWeight, 20.0, accuracy: 1e-6)
         XCTAssertEqual(reloaded.cursorHighlightSize, 75.0, accuracy: 1e-6)

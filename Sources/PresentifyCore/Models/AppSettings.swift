@@ -384,8 +384,9 @@ public final class AppSettings: ObservableObject {
 
         self.favColors = Self.loadCodable(from: defaults, key: Keys.favColors, fallback: Self.defaultFavColors)
         self.selectedColorIndex = Self.loadInt(from: defaults, key: Keys.selectedColorIndex, fallback: 0)
-        self.useRandomColors = Self.loadBool(from: defaults, key: Keys.useRandomColors, fallback: false)
-        self.enableGradients = Self.loadBool(from: defaults, key: Keys.enableGradients, fallback: false)
+        let loadedRandom = Self.loadBool(from: defaults, key: Keys.useRandomColors, fallback: false)
+        self.useRandomColors = loadedRandom
+        self.enableGradients = loadedRandom && Self.loadBool(from: defaults, key: Keys.enableGradients, fallback: false)
         self.activeGradient = Self.loadCodable(from: defaults, key: Keys.activeGradient, fallback: GradientGenerator.presets[0])
         self.currentDrawMode = Self.loadCodable(from: defaults, key: Keys.currentDrawMode, fallback: .freeHand)
         self.minLineWeight = minWeight
@@ -456,24 +457,34 @@ public final class AppSettings: ObservableObject {
     }
 
     public var activeStrokeGradient: GradientPair? {
-        guard enableGradients else { return nil }
-        if useRandomColors {
-            return GradientGenerator.randomVividGradient()
-        }
+        guard enableGradients && useRandomColors else { return nil }
         return activeGradient
     }
 
     public func selectFavoriteColor(index: Int) {
         guard index >= 0 && index < favColors.count else { return }
         useRandomColors = false
+        enableGradients = false
         selectedColorIndex = index
+    }
+
+    public func setCustomStrokeColor(_ color: RGBColor) {
+        useRandomColors = false
+        enableGradients = false
+        guard !favColors.isEmpty else {
+            favColors = [color]
+            selectedColorIndex = 0
+            return
+        }
+        let safeIndex = min(max(selectedColorIndex, 0), favColors.count - 1)
+        favColors[safeIndex] = color
+        selectedColorIndex = safeIndex
     }
 
     public func selectRandomColors() {
         useRandomColors = true
-        if enableGradients {
-            activeGradient = GradientGenerator.randomVividGradient()
-        }
+        enableGradients = true
+        activeGradient = GradientGenerator.randomVividGradient()
     }
 
     public func selectOrToggleDrawMode(_ mode: DrawMode) {

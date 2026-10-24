@@ -785,6 +785,7 @@ public final class AnnotateOverlayController {
         }
 
         stopTimersAndMonitors()
+        CustomColorPanelBridge.shared.close()
         controlsPanel?.orderOut(nil)
         shortcutsPanel?.orderOut(nil)
         panel?.orderOut(nil)
@@ -828,6 +829,9 @@ public final class AnnotateOverlayController {
         if settings.isShowingShortcutsCheatsheet, let shortcutsPanel, shortcutsPanel.isVisible {
             rects.append(shortcutsPanel.frame)
         }
+        if NSColorPanel.sharedColorPanelExists && NSColorPanel.shared.isVisible {
+            rects.append(NSColorPanel.shared.frame)
+        }
         return rects
     }
 
@@ -860,6 +864,16 @@ public final class AnnotateOverlayController {
             .sink { [weak self] enabled in
                 guard let self, enabled, self.settings.isAnnotating else { return }
                 self.toastController.showToast(.touchDraw, message: "Touch Draw enabled: Draw with 1 finger on trackpad")
+            }
+            .store(in: &cancellables)
+
+        settings.$selectedColorIndex
+            .combineLatest(settings.$favColors, settings.$useRandomColors, settings.$enableGradients)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _, _, _ in
+                guard let self, self.settings.isAnnotating else { return }
+                self.canvasView?.activeTextField?.textColor = self.settings.activeStrokeColor.nsColor
+                self.canvasView?.needsDisplay = true
             }
             .store(in: &cancellables)
 

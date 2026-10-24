@@ -218,6 +218,41 @@ public final class ToastWindowController {
     }
 }
 
+public final class CustomColorPanelBridge: NSObject {
+    public static let shared = CustomColorPanelBridge()
+    private weak var activeSettings: AppSettings?
+    private var isUpdatingPanelColor = false
+
+    public func present(for settings: AppSettings) {
+        activeSettings = settings
+        let panel = NSColorPanel.shared
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 3)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.showsAlpha = false
+        panel.isContinuous = true
+        isUpdatingPanelColor = true
+        panel.color = settings.activeStrokeColor.nsColor
+        isUpdatingPanelColor = false
+        panel.setTarget(self)
+        panel.setAction(#selector(colorPanelDidChange(_:)))
+        NSApp.activate(ignoringOtherApps: true)
+        panel.orderFrontRegardless()
+    }
+
+    public func close() {
+        if NSColorPanel.sharedColorPanelExists {
+            NSColorPanel.shared.setTarget(nil)
+            NSColorPanel.shared.setAction(nil)
+            NSColorPanel.shared.orderOut(nil)
+        }
+    }
+
+    @objc private func colorPanelDidChange(_ sender: NSColorPanel) {
+        guard !isUpdatingPanelColor, let settings = activeSettings else { return }
+        settings.setCustomStrokeColor(RGBColor(nsColor: sender.color))
+    }
+}
+
 public struct AnnotateControlsView: View {
     @ObservedObject public var settings: AppSettings
     public let canvasState: AnnotationCanvasState?
@@ -317,7 +352,6 @@ public struct AnnotateControlsView: View {
             }
 
             Button {
-                settings.enableGradients = true
                 settings.selectRandomColors()
             } label: {
                 Circle()
@@ -341,7 +375,36 @@ public struct AnnotateControlsView: View {
             .buttonStyle(.plain)
             .contentShape(Circle())
             .help("Random Colors / Gradient (6)")
+
+            Button {
+                openCustomColorPanel()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(
+                            AngularGradient(
+                                colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
+                                center: .center
+                            )
+                        )
+                        .frame(width: 22, height: 22)
+                    Circle()
+                        .fill(settings.activeStrokeColor.swiftUIColor)
+                        .frame(width: 10, height: 10)
+                        .overlay(
+                            Circle().strokeBorder(Color.white, lineWidth: 1)
+                        )
+                }
+                .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .contentShape(Circle())
+            .help("Custom Color Picker...")
         }
+    }
+
+    private func openCustomColorPanel() {
+        CustomColorPanelBridge.shared.present(for: settings)
     }
 
     private var drawingToolsSection: some View {
