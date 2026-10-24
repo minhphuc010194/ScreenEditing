@@ -109,7 +109,7 @@ public struct ToastBannerView: View {
     public var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "sparkles")
-                .foregroundStyle(.purple)
+                .foregroundStyle(SettingsView.themeLightBlue)
             Text(message)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.primary)
@@ -134,7 +134,7 @@ public struct ToastBannerView: View {
         .padding(.vertical, 10)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(
-            Capsule().strokeBorder(Color.white.opacity(0.2), lineWidth: 1)
+            Capsule().strokeBorder(SettingsView.themeLightBlue.opacity(0.35), lineWidth: 1)
         )
     }
 }
@@ -272,7 +272,7 @@ public struct AnnotateControlsView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                .strokeBorder(SettingsView.themeLightBlue.opacity(0.32), lineWidth: 1)
         )
     }
 
@@ -352,9 +352,10 @@ public struct AnnotateControlsView: View {
                 } label: {
                     Image(systemName: mode.systemImage)
                         .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(settings.currentDrawMode == mode ? Color.white : SettingsView.themeLightBlue)
                         .frame(width: 30, height: 30)
                         .background(
-                            settings.currentDrawMode == mode ? Color.accentColor.opacity(0.28) : Color.clear,
+                            settings.currentDrawMode == mode ? SettingsView.themeBlue : Color.clear,
                             in: RoundedRectangle(cornerRadius: 7)
                         )
                         .contentShape(Rectangle())
@@ -498,9 +499,10 @@ public struct AnnotateControlsView: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(isActive ? Color.white : SettingsView.themeLightBlue)
                 .frame(width: 30, height: 30)
                 .background(
-                    isActive ? Color.purple.opacity(0.32) : Color.clear,
+                    isActive ? SettingsView.themeBlue : Color.clear,
                     in: RoundedRectangle(cornerRadius: 7)
                 )
                 .contentShape(Rectangle())
@@ -533,6 +535,7 @@ public struct AnnotateShortcutsView: View {
             HStack {
                 Label("Annotation Shortcuts & Tips", systemImage: "keyboard")
                     .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(SettingsView.themeBlue)
                 Spacer()
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
@@ -554,9 +557,10 @@ public struct AnnotateShortcutsView: View {
                         Spacer()
                         Text(shortcutManager.binding(for: command).displayString)
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(SettingsView.themeBlue)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
+                            .background(SettingsView.themeLightBlue.opacity(0.16), in: RoundedRectangle(cornerRadius: 4))
                     }
                 }
             }
@@ -571,6 +575,7 @@ public struct AnnotateShortcutsView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(tip.symbol)
                             .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundStyle(SettingsView.themeBlue)
                             .frame(width: 82, alignment: .leading)
                         Text(tip.description)
                             .font(.system(size: 12))

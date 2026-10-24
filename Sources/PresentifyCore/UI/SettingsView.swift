@@ -33,11 +33,12 @@ public struct ShortcutRecorderRow: View {
             } label: {
                 Text(isRecording ? "Press keys..." : shortcutManager.binding(for: command).displayString)
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(isRecording ? SettingsView.themeBlue : .primary)
                     .frame(minWidth: 92)
                     .padding(.vertical, 4)
                     .padding(.horizontal, 8)
                     .background(
-                        isRecording ? Color.accentColor.opacity(0.25) : Color.secondary.opacity(0.14),
+                        isRecording ? SettingsView.themeBlue.opacity(0.22) : SettingsView.themeLightBlue.opacity(0.14),
                         in: RoundedRectangle(cornerRadius: 6)
                     )
             }
@@ -49,6 +50,7 @@ public struct ShortcutRecorderRow: View {
             } label: {
                 Image(systemName: "arrow.counterclockwise")
                     .font(.system(size: 11))
+                    .foregroundStyle(SettingsView.themeBlue)
             }
             .buttonStyle(.plain)
             .help("Reset to Default")
@@ -96,6 +98,13 @@ public struct SettingsView: View {
 
     public static let appVersionText = "Version 8.1.2 (Build 68)"
     public static let copyrightText = "© Softal.io. All rights reserved."
+    public static let themeBlue = Color(red: 0.08, green: 0.52, blue: 0.98)
+    public static let themeLightBlue = Color(red: 0.38, green: 0.78, blue: 1.0)
+    public static let themeGradient = LinearGradient(
+        colors: [themeBlue, themeLightBlue],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
 
     public static func appIconImage() -> NSImage? {
         if let bundled = Bundle.main.image(forResource: "AppIcon") {
@@ -143,6 +152,7 @@ public struct SettingsView: View {
             }
         }
         .frame(width: 660, height: 520)
+        .tint(Self.themeBlue)
         .alert("Restore Default Settings?", isPresented: $isShowingRestoreAlert) {
             Button("Cancel", role: .cancel) {}
             Button("Restore Defaults", role: .destructive) {
@@ -167,9 +177,9 @@ public struct SettingsView: View {
                             .font(.system(size: 11, weight: .medium))
                     }
                     .frame(width: 82, height: 52)
-                    .foregroundStyle(settings.selectedSettingsTab == tab ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(settings.selectedSettingsTab == tab ? Self.themeBlue : Color.secondary)
                     .background(
-                        settings.selectedSettingsTab == tab ? Color.accentColor.opacity(0.14) : Color.clear,
+                        settings.selectedSettingsTab == tab ? Self.themeLightBlue.opacity(0.18) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 8)
                     )
                 }
@@ -405,7 +415,7 @@ public struct SettingsView: View {
             otherAppCard(
                 name: "FaceScreen",
                 subtitle: "Floating webcam overlay right on your screen for engaging presentations and recordings.",
-                icon: "person.crop.circle.badge.video",
+                icon: "web.camera.fill",
                 url: "https://facescreen.app"
             )
 
@@ -429,16 +439,7 @@ public struct SettingsView: View {
             } else {
                 ZStack {
                     RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.54, green: 0.23, blue: 0.94),
-                                    Color(red: 0.36, green: 0.14, blue: 0.76)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
+                        .fill(Self.themeGradient)
                         .frame(width: 84, height: 84)
                     Image(systemName: "tv.and.mediabox")
                         .font(.system(size: 38, weight: .bold))
@@ -521,7 +522,7 @@ public struct SettingsView: View {
         case .updateAvailable(let release):
             HStack(spacing: 10) {
                 Image(systemName: "arrow.down.circle.fill")
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(Self.themeBlue)
                 Text("Update available: \(release.tagName)")
                     .font(.system(size: 12, weight: .semibold))
                 Button("Download & Install Update") {
@@ -568,9 +569,9 @@ public struct SettingsView: View {
         HStack(spacing: 16) {
             Image(systemName: icon)
                 .font(.system(size: 30))
-                .foregroundStyle(.purple)
+                .foregroundStyle(Self.themeBlue)
                 .frame(width: 54, height: 54)
-                .background(Color.purple.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+                .background(Self.themeLightBlue.opacity(0.16), in: RoundedRectangle(cornerRadius: 12))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(name)

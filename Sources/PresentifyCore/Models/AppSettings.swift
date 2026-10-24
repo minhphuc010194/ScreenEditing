@@ -11,8 +11,9 @@ public final class AppSettings: ObservableObject {
         .yellow,
         .green,
         .blue,
-        .purple
+        .blue
     ]
+    public static let defaultHighlightColor: RGBColor = .blue
 
     public let defaults: UserDefaults
     private var isRestoring = false

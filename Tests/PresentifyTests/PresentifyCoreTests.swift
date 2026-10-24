@@ -511,6 +511,18 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(SettingsView.appVersionText, "Version 8.1.2 (Build 68)")
         XCTAssertEqual(SettingsView.copyrightText, "© Softal.io. All rights reserved.")
         XCTAssertNotNil(SettingsView.appIconImage())
+        XCTAssertEqual(AppSettings.defaultHighlightColor, .blue)
+
+        let primaryBlue = NSColor(SettingsView.themeBlue).usingColorSpace(.sRGB)
+        let lightBlue = NSColor(SettingsView.themeLightBlue).usingColorSpace(.sRGB)
+        XCTAssertNotNil(primaryBlue)
+        XCTAssertNotNil(lightBlue)
+        if let primaryBlue, let lightBlue {
+            XCTAssertGreaterThan(primaryBlue.blueComponent, primaryBlue.redComponent)
+            XCTAssertGreaterThan(primaryBlue.blueComponent, primaryBlue.greenComponent)
+            XCTAssertGreaterThan(lightBlue.blueComponent, lightBlue.redComponent)
+            XCTAssertGreaterThan(lightBlue.blueComponent, lightBlue.greenComponent)
+        }
 
         XCTAssertNil(appController.settingsWindow)
         XCTAssertTrue(appController.handleAppKeyDown(keyCode: 0x2B, modifiers: KeyBinding.commandMask))

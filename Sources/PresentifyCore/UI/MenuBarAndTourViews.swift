@@ -122,6 +122,7 @@ public struct PresentifyMenuView: View {
         }
         .padding(10)
         .frame(width: 260)
+        .tint(SettingsView.themeBlue)
     }
 
     private func menuRow(
@@ -135,9 +136,10 @@ public struct PresentifyMenuView: View {
             HStack(spacing: 10) {
                 Image(systemName: icon)
                     .frame(width: 18)
-                    .foregroundStyle(isActive ? Color.purple : Color.primary)
+                    .foregroundStyle(isActive ? SettingsView.themeBlue : SettingsView.themeLightBlue)
                 Text(title)
                     .font(.system(size: 13, weight: isActive ? .semibold : .regular))
+                    .foregroundStyle(isActive ? SettingsView.themeBlue : Color.primary)
                 Spacer()
                 if !shortcut.isEmpty {
                     Text(shortcut)
@@ -148,7 +150,7 @@ public struct PresentifyMenuView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(
-                isActive ? Color.purple.opacity(0.15) : Color.clear,
+                isActive ? SettingsView.themeLightBlue.opacity(0.18) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 6)
             )
             .contentShape(Rectangle())
@@ -305,9 +307,9 @@ public struct WelcomeTourView: View {
             } else {
                 Image(systemName: step.systemImage)
                     .font(.system(size: 56, weight: .semibold))
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(SettingsView.themeBlue)
                     .frame(width: 96, height: 96)
-                    .background(Color.purple.opacity(0.14), in: RoundedRectangle(cornerRadius: 24))
+                    .background(SettingsView.themeLightBlue.opacity(0.16), in: RoundedRectangle(cornerRadius: 24))
             }
 
             Text(step.title)
@@ -324,7 +326,7 @@ public struct WelcomeTourView: View {
             HStack(spacing: 8) {
                 ForEach(Self.pages) { page in
                     Circle()
-                        .fill(page.id == currentPage ? Color.purple : Color.secondary.opacity(0.3))
+                        .fill(page.id == currentPage ? SettingsView.themeBlue : Color.secondary.opacity(0.3))
                         .frame(width: 8, height: 8)
                 }
             }
@@ -352,5 +354,6 @@ public struct WelcomeTourView: View {
         }
         .padding(28)
         .frame(width: 520, height: 380)
+        .tint(SettingsView.themeBlue)
     }
 }

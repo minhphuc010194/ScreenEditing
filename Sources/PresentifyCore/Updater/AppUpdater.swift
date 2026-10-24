@@ -498,16 +498,7 @@ public struct UpdateNotificationView: View {
             HStack(spacing: 14) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.54, green: 0.23, blue: 0.94),
-                                    Color(red: 0.36, green: 0.14, blue: 0.76)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
+                        .fill(SettingsView.themeGradient)
                         .frame(width: 52, height: 52)
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 26, weight: .bold))
@@ -539,6 +530,7 @@ public struct UpdateNotificationView: View {
         }
         .padding(22)
         .frame(width: 480)
+        .tint(SettingsView.themeBlue)
     }
 
     @ViewBuilder
