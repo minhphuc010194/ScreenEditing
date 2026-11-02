@@ -312,6 +312,8 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
     public var fontName: String
     public var fontSize: Double
     public var blurStyle: BlurStyle? = nil
+    public var blurOpacity: Double? = nil
+    public var blurTintColor: RGBColor? = nil
 
     public init(
         id: UUID = UUID(),
@@ -330,7 +332,9 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         text: String = "",
         fontName: String = AnnotateFontOption.systemDefault.fontName,
         fontSize: Double = 24.0,
-        blurStyle: BlurStyle? = nil
+        blurStyle: BlurStyle? = nil,
+        blurOpacity: Double? = nil,
+        blurTintColor: RGBColor? = nil
     ) {
         self.id = id
         self.mode = mode
@@ -349,12 +353,19 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         self.fontName = fontName
         self.fontSize = fontSize
         self.blurStyle = blurStyle
+        self.blurOpacity = blurOpacity
+        self.blurTintColor = blurTintColor
     }
 
     public var effectiveBlurStyle: BlurStyle {
         let baseStyle = blurStyle ?? .gaussian
         guard isFilled else { return baseStyle }
         return baseStyle == .gaussian ? .pixelate : .gaussian
+    }
+
+    public var effectiveBlurOpacity: Double {
+        guard let raw = blurOpacity, raw.isFinite else { return 0.55 }
+        return min(max(raw, 0.10), 1.00)
     }
 
     public var boundingRect: CGRect {
@@ -427,6 +438,8 @@ public final class AnnotationCanvasState: ObservableObject {
         isShiftDown: Bool = false,
         isOptionDown: Bool = false,
         blurStyle: BlurStyle? = nil,
+        blurOpacity: Double? = nil,
+        blurTintColor: RGBColor? = nil,
         now: TimeInterval = Date().timeIntervalSince1970
     ) {
         selectedIDs.removeAll()
@@ -448,7 +461,9 @@ public final class AnnotationCanvasState: ObservableObject {
             isHighlighter: effectiveHighlighter,
             isAutoErase: isAutoErase,
             createdAt: now,
-            blurStyle: mode == .blur ? blurStyle : nil
+            blurStyle: mode == .blur ? blurStyle : nil,
+            blurOpacity: mode == .blur ? blurOpacity : nil,
+            blurTintColor: mode == .blur ? blurTintColor : nil
         )
     }
 
@@ -702,6 +717,57 @@ public final class AnnotationCanvasState: ObservableObject {
         }
     }
 
+    public func updateSelectedBlurOpacity(_ opacity: Double) {
+        guard !selectedIDs.isEmpty else { return }
+        let clamped = opacity.isFinite ? min(max(opacity, 0.10), 1.00) : 0.55
+        let willChange = annotations.contains { item in
+            let isSelectedBlur = selectedIDs.contains(item.id) && item.mode == .blur
+            return isSelectedBlur && item.blurOpacity != clamped
+        }
+        guard willChange else { return }
+        recordUndoSnapshot()
+        for index in annotations.indices {
+            let isSelectedBlur = selectedIDs.contains(annotations[index].id) && annotations[index].mode == .blur
+            if isSelectedBlur {
+                annotations[index].blurOpacity = clamped
+            }
+        }
+    }
+
+    public func updateSelectedBlurStyle(_ style: BlurStyle) {
+        guard !selectedIDs.isEmpty else { return }
+        let willChange = annotations.contains { item in
+            let isSelectedBlur = selectedIDs.contains(item.id) && item.mode == .blur
+            let differsFromTarget = item.blurStyle != style || item.isFilled
+            return isSelectedBlur && differsFromTarget
+        }
+        guard willChange else { return }
+        recordUndoSnapshot()
+        for index in annotations.indices {
+            let isSelectedBlur = selectedIDs.contains(annotations[index].id) && annotations[index].mode == .blur
+            if isSelectedBlur {
+                annotations[index].blurStyle = style
+                annotations[index].isFilled = false
+            }
+        }
+    }
+
+    public func updateSelectedBlurTintColor(_ tintColor: RGBColor?) {
+        guard !selectedIDs.isEmpty else { return }
+        let willChange = annotations.contains { item in
+            let isSelectedBlur = selectedIDs.contains(item.id) && item.mode == .blur
+            return isSelectedBlur && item.blurTintColor != tintColor
+        }
+        guard willChange else { return }
+        recordUndoSnapshot()
+        for index in annotations.indices {
+            let isSelectedBlur = selectedIDs.contains(annotations[index].id) && annotations[index].mode == .blur
+            if isSelectedBlur {
+                annotations[index].blurTintColor = tintColor
+            }
+        }
+    }
+
     public func deleteSelectedOrClearAll() {
         if !selectedIDs.isEmpty {
             recordUndoSnapshot()
@@ -796,6 +862,17 @@ public final class AnnotationCanvasState: ObservableObject {
             }
             item.lineWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 1.0), 64.0) : 6.0
             item.fontSize = item.fontSize.isFinite ? min(max(item.fontSize, 8.0), 200.0) : 24.0
+            if let rawOpacity = item.blurOpacity {
+                item.blurOpacity = rawOpacity.isFinite ? min(max(rawOpacity, 0.10), 1.00) : 0.55
+            }
+            if let rawTint = item.blurTintColor {
+                item.blurTintColor = RGBColor(
+                    red: rawTint.red.isFinite ? rawTint.red : 0.08,
+                    green: rawTint.green.isFinite ? rawTint.green : 0.52,
+                    blue: rawTint.blue.isFinite ? rawTint.blue : 0.98,
+                    alpha: 1.0
+                )
+            }
             sanitized.append(item)
         }
         recordUndoSnapshot()
