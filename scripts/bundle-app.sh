@@ -27,6 +27,8 @@ if [[ -n "${APP_VERSION:-}" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" "${CONTENTS_DIR}/Info.plist"
 fi
 
+codesign --force --deep --sign - --identifier "com.screenediting.app" "${APP_DIR}"
+
 ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${ZIP_PATH}"
 
 echo "Built macOS app bundle at: ${APP_DIR}"

@@ -1310,6 +1310,406 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(clippedCenter.a, 255)
     }
 
+    func testScreenCaptureManagerFrameCroppingAt1xAnd2xAndLifecycle() {
+        let captureManager = ScreenCaptureManager()
+        var firstFrameCount = 0
+        captureManager.onFirstFrameCaptured = {
+            firstFrameCount += 1
+        }
+
+        XCTAssertNil(captureManager.latestFrame)
+        XCTAssertTrue(captureManager.capturedDisplayFrame.isNull)
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: 10, y: 10, width: 50, height: 30), excludingWindowID: nil))
+
+        guard let image1x = makeQuadrantTestImage(width: 200, height: 100),
+              let image2x = makeQuadrantTestImage(width: 400, height: 200) else {
+            XCTFail("Expected 1x and 2x quadrant test images")
+            return
+        }
+
+        let display1x = CGRect(x: 0, y: 0, width: 200, height: 100)
+        captureManager.updateCapturedFrame(image1x, displayFrame: display1x)
+        XCTAssertEqual(firstFrameCount, 1)
+        XCTAssertEqual(captureManager.capturedDisplayFrame, display1x)
+        XCTAssertEqual(captureManager.latestFrame?.width, 200)
+
+        captureManager.updateCapturedFrame(image1x, displayFrame: display1x)
+        XCTAssertEqual(firstFrameCount, 1)
+
+        guard let topLeft1x = captureManager.captureScreenRect(CGRect(x: 10, y: 60, width: 50, height: 30), excludingWindowID: nil),
+              let bottomLeft1x = captureManager.captureScreenRect(CGRect(x: 10, y: 10, width: 50, height: 30), excludingWindowID: nil),
+              let topRight1x = captureManager.captureScreenRect(CGRect(x: 120, y: 60, width: 50, height: 30), excludingWindowID: nil),
+              let bottomRight1x = captureManager.captureScreenRect(CGRect(x: 120, y: 10, width: 50, height: 30), excludingWindowID: nil) else {
+            XCTFail("Expected cropped 1x quadrant images")
+            return
+        }
+        XCTAssertEqual(topLeft1x.width, 50)
+        XCTAssertEqual(topLeft1x.height, 30)
+
+        if let tlPx = rgbaPixel(in: topLeft1x, at: (x: 25, y: 15)),
+           let blPx = rgbaPixel(in: bottomLeft1x, at: (x: 25, y: 15)),
+           let trPx = rgbaPixel(in: topRight1x, at: (x: 25, y: 15)),
+           let brPx = rgbaPixel(in: bottomRight1x, at: (x: 25, y: 15)) {
+            XCTAssertGreaterThan(tlPx.r, 200)
+            XCTAssertLessThan(tlPx.g, 50)
+            XCTAssertLessThan(tlPx.b, 50)
+            XCTAssertEqual(tlPx.a, 255)
+
+            XCTAssertLessThan(blPx.r, 50)
+            XCTAssertLessThan(blPx.g, 70)
+            XCTAssertGreaterThan(blPx.b, 200)
+            XCTAssertEqual(blPx.a, 255)
+
+            XCTAssertLessThan(trPx.r, 50)
+            XCTAssertGreaterThan(trPx.g, 200)
+            XCTAssertLessThan(trPx.b, 60)
+            XCTAssertEqual(trPx.a, 255)
+
+            XCTAssertGreaterThan(brPx.r, 200)
+            XCTAssertGreaterThan(brPx.g, 190)
+            XCTAssertLessThan(brPx.b, 50)
+            XCTAssertEqual(brPx.a, 255)
+        } else {
+            XCTFail("Expected readable pixels from 1x quadrant crops")
+        }
+
+        captureManager.stopStream()
+        XCTAssertNil(captureManager.latestFrame)
+        XCTAssertTrue(captureManager.capturedDisplayFrame.isNull)
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: 10, y: 60, width: 50, height: 30), excludingWindowID: nil))
+
+        let display2x = CGRect(x: 300, y: 150, width: 200, height: 100)
+        captureManager.updateCapturedFrame(image2x, displayFrame: display2x)
+        XCTAssertEqual(firstFrameCount, 2)
+        XCTAssertEqual(captureManager.capturedDisplayFrame, display2x)
+
+        guard let topLeft2x = captureManager.captureScreenRect(CGRect(x: 310, y: 210, width: 40, height: 25), excludingWindowID: nil),
+              let bottomLeft2x = captureManager.captureScreenRect(CGRect(x: 310, y: 160, width: 40, height: 25), excludingWindowID: nil),
+              let topRight2x = captureManager.captureScreenRect(CGRect(x: 420, y: 210, width: 40, height: 25), excludingWindowID: nil),
+              let bottomRight2x = captureManager.captureScreenRect(CGRect(x: 420, y: 160, width: 40, height: 25), excludingWindowID: nil) else {
+            XCTFail("Expected cropped 2x Retina quadrant images")
+            return
+        }
+        XCTAssertEqual(topLeft2x.width, 80)
+        XCTAssertEqual(topLeft2x.height, 50)
+        XCTAssertEqual(bottomRight2x.width, 80)
+        XCTAssertEqual(bottomRight2x.height, 50)
+
+        if let tl2x = rgbaPixel(in: topLeft2x, at: (x: 40, y: 25)),
+           let bl2x = rgbaPixel(in: bottomLeft2x, at: (x: 40, y: 25)),
+           let tr2x = rgbaPixel(in: topRight2x, at: (x: 40, y: 25)),
+           let br2x = rgbaPixel(in: bottomRight2x, at: (x: 40, y: 25)) {
+            XCTAssertGreaterThan(tl2x.r, 200)
+            XCTAssertLessThan(tl2x.b, 50)
+            XCTAssertGreaterThan(bl2x.b, 200)
+            XCTAssertLessThan(bl2x.r, 50)
+            XCTAssertGreaterThan(tr2x.g, 200)
+            XCTAssertLessThan(tr2x.r, 50)
+            XCTAssertGreaterThan(br2x.r, 200)
+            XCTAssertGreaterThan(br2x.g, 190)
+        } else {
+            XCTFail("Expected readable pixels from 2x Retina quadrant crops")
+        }
+
+        if let regionAround = captureManager.captureRegionAround(
+            screenPoint: CGPoint(x: 330, y: 220),
+            captureSize: CGSize(width: 20, height: 20),
+            excludingWindowID: nil
+        ), let regionPx = rgbaPixel(in: regionAround, at: (x: 20, y: 20)) {
+            XCTAssertEqual(regionAround.width, 40)
+            XCTAssertEqual(regionAround.height, 40)
+            XCTAssertGreaterThan(regionPx.r, 200)
+            XCTAssertLessThan(regionPx.b, 50)
+        } else {
+            XCTFail("Expected captureRegionAround to crop from SCStream frame")
+        }
+
+        guard let clippedTopLeft2x = captureManager.captureScreenRect(
+            CGRect(x: 260, y: 220, width: 70, height: 50),
+            excludingWindowID: nil
+        ), let clippedBottomRight2x = captureManager.captureScreenRect(
+            CGRect(x: 475, y: 130, width: 60, height: 40),
+            excludingWindowID: nil
+        ) else {
+            XCTFail("Expected partial off-display 2x Retina crops to clip cleanly")
+            return
+        }
+        XCTAssertEqual(clippedTopLeft2x.width, 60)
+        XCTAssertEqual(clippedTopLeft2x.height, 60)
+        XCTAssertEqual(clippedBottomRight2x.width, 50)
+        XCTAssertEqual(clippedBottomRight2x.height, 40)
+        if let clippedTLPx = rgbaPixel(in: clippedTopLeft2x, at: (x: 30, y: 30)),
+           let clippedBRPx = rgbaPixel(in: clippedBottomRight2x, at: (x: 25, y: 20)) {
+            XCTAssertGreaterThan(clippedTLPx.r, 200)
+            XCTAssertLessThan(clippedTLPx.b, 50)
+            XCTAssertGreaterThan(clippedBRPx.r, 200)
+            XCTAssertGreaterThan(clippedBRPx.g, 190)
+            XCTAssertLessThan(clippedBRPx.b, 50)
+        } else {
+            XCTFail("Expected readable pixels from partial off-display 2x crops")
+        }
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: 250, y: 160, width: 51, height: 30), excludingWindowID: nil))
+
+        captureManager.stopStream()
+        XCTAssertNil(captureManager.latestFrame)
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: 310, y: 210, width: 40, height: 25), excludingWindowID: nil))
+
+        let bgCaptureManager = ScreenCaptureManager()
+        let firstFrameExpectation = expectation(description: "Background updateCapturedFrame delivers onFirstFrameCaptured on main queue")
+        var deliveredOnMainThread = false
+        bgCaptureManager.onFirstFrameCaptured = {
+            deliveredOnMainThread = Thread.isMainThread
+            firstFrameExpectation.fulfill()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            bgCaptureManager.updateCapturedFrame(image2x, displayFrame: display2x)
+        }
+        wait(for: [firstFrameExpectation], timeout: 2.0)
+        XCTAssertTrue(deliveredOnMainThread)
+        XCTAssertEqual(bgCaptureManager.capturedDisplayFrame, display2x)
+        XCTAssertEqual(bgCaptureManager.latestFrame?.width, 400)
+        bgCaptureManager.stopStream()
+    }
+
+    func testBackdropBlurRegionViewLifecycleAndOpaqueScreenshotExport() {
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateToolIndicator = false
+        settings.whiteboardEnabled = false
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let view = AnnotateCanvasView(
+            frame: NSRect(x: 0, y: 0, width: 300, height: 240),
+            canvasState: canvas,
+            settings: settings,
+            shortcutManager: shortcuts
+        )
+        XCTAssertNil(view.regionCaptureProvider)
+        XCTAssertTrue(view.backdropBlurViews.isEmpty)
+
+        canvas.beginStroke(at: CGPoint(x: 60, y: 60), mode: .blur, color: .blue, lineWeight: 8.0, blurStyle: .gaussian)
+        canvas.updateStroke(to: CGPoint(x: 240, y: 180))
+        view.syncBackdropBlurViews()
+        XCTAssertEqual(view.backdropBlurViews.count, 1)
+        if let draftID = canvas.activeDraft?.id, let draftBackdrop = view.backdropBlurViews[draftID] {
+            XCTAssertEqual(draftBackdrop.borderStyle, .draft)
+            XCTAssertEqual(draftBackdrop.layer?.borderWidth ?? 0, 1.5, accuracy: 1e-6)
+        } else {
+            XCTFail("Expected draft BackdropBlurRegionView while dragging blur stroke")
+        }
+
+        canvas.finishStroke()
+        view.syncBackdropBlurViews()
+        XCTAssertEqual(canvas.annotations.count, 1)
+        let blurID = canvas.annotations[0].id
+        guard let backdropView = view.backdropBlurViews[blurID] else {
+            XCTFail("Expected committed BackdropBlurRegionView")
+            return
+        }
+        XCTAssertTrue(backdropView.superview === view)
+        XCTAssertEqual(backdropView.blendingMode, .behindWindow)
+        XCTAssertEqual(backdropView.material, .selection)
+        XCTAssertFalse(backdropView.isEmphasized)
+        XCTAssertEqual(backdropView.state, .active)
+        XCTAssertNil(backdropView.hitTest(NSPoint(x: 10, y: 10)))
+        XCTAssertEqual(backdropView.frame, CGRect(x: 60, y: 60, width: 180, height: 120))
+        XCTAssertEqual(backdropView.borderStyle, .committed)
+        XCTAssertEqual(backdropView.layer?.borderWidth ?? 0, 1.0, accuracy: 1e-6)
+
+        guard let exportedPNG = Screenshotter.renderViewToPNGData(view),
+              let exportedCG = NSBitmapImageRep(data: exportedPNG)?.cgImage else {
+            XCTFail("Expected Screenshotter PNG while BackdropBlurRegionView is mounted")
+            return
+        }
+        if let centerPx = rgbaPixel(in: exportedCG, at: (x: exportedCG.width / 2, y: exportedCG.height / 2)),
+           let innerCornerPx = rgbaPixel(in: exportedCG, at: (x: exportedCG.width / 3, y: exportedCG.height / 3)),
+           let outsidePx = rgbaPixel(in: exportedCG, at: (x: 10, y: 10)) {
+            XCTAssertEqual(centerPx.a, 255)
+            XCTAssertLessThan(centerPx.g, 120)
+            XCTAssertEqual(innerCornerPx.a, 255)
+            XCTAssertEqual(outsidePx.a, 0)
+        } else {
+            XCTFail("Expected readable pixels from exported PNG with mounted backdrop view")
+        }
+        XCTAssertFalse(backdropView.isHidden)
+        XCTAssertTrue(backdropView.superview === view)
+
+        canvas.selectedIDs = [blurID]
+        canvas.moveSelectedAnnotations(by: CGSize(width: 15, height: -10))
+        view.syncBackdropBlurViews()
+        XCTAssertEqual(backdropView.frame, CGRect(x: 75, y: 50, width: 180, height: 120))
+
+        canvas.annotations[0].endPoint = CGPoint(x: 195, y: 150)
+        view.syncBackdropBlurViews()
+        XCTAssertEqual(backdropView.frame, CGRect(x: 75, y: 50, width: 120, height: 100))
+
+        view.regionCaptureProvider = { _ in
+            self.makeQuadrantTestImage(width: 120, height: 100)
+        }
+        XCTAssertTrue(view.backdropBlurViews.isEmpty)
+        XCTAssertNil(backdropView.superview)
+
+        guard let capturedPNG = Screenshotter.renderViewToPNGData(view),
+              let capturedCG = NSBitmapImageRep(data: capturedPNG)?.cgImage,
+              let capturedMid = rgbaPixel(in: capturedCG, at: (x: capturedCG.width / 2, y: capturedCG.height / 2)) else {
+            XCTFail("Expected blurred CGImage render when regionCaptureProvider returns an image")
+            return
+        }
+        XCTAssertEqual(capturedMid.a, 255)
+        XCTAssertGreaterThan(Int(capturedMid.r) + Int(capturedMid.g) + Int(capturedMid.b), 120)
+
+        canvas.annotations[0].blurStyle = .pixelate
+        view.clearBlurCache()
+        guard let pixPNG = Screenshotter.renderViewToPNGData(view),
+              let pixCG = NSBitmapImageRep(data: pixPNG)?.cgImage,
+              let pixMid = rgbaPixel(in: pixCG, at: (x: pixCG.width / 2, y: pixCG.height / 2)) else {
+            XCTFail("Expected pixelated CGImage render when blurStyle is pixelate")
+            return
+        }
+        XCTAssertEqual(pixMid.a, 255)
+
+        var draftCaptureCalls = 0
+        view.regionCaptureProvider = { _ in
+            draftCaptureCalls += 1
+            return self.makeQuadrantTestImage(width: 120, height: 100)
+        }
+        canvas.clearAll()
+        canvas.beginStroke(at: CGPoint(x: 40, y: 40), mode: .blur, color: .blue, lineWeight: 8.0, blurStyle: .gaussian)
+        canvas.updateStroke(to: CGPoint(x: 160, y: 140))
+        view.syncBackdropBlurViews()
+        _ = Screenshotter.renderViewToPNGData(view)
+        XCTAssertEqual(draftCaptureCalls, 1)
+
+        canvas.updateStroke(to: CGPoint(x: 180, y: 150))
+        view.syncBackdropBlurViews()
+        _ = Screenshotter.renderViewToPNGData(view)
+        XCTAssertEqual(draftCaptureCalls, 2)
+        canvas.finishStroke()
+
+        view.regionCaptureProvider = nil
+        XCTAssertEqual(view.backdropBlurViews.count, 1)
+
+        settings.whiteboardEnabled = true
+        view.syncBackdropBlurViews()
+        XCTAssertTrue(view.backdropBlurViews.isEmpty)
+
+        settings.whiteboardEnabled = false
+        view.syncBackdropBlurViews()
+        XCTAssertEqual(view.backdropBlurViews.count, 1)
+
+        view.removeAllBackdropBlurViews()
+        canvas.clearAll()
+        view.beginInlineTextEditing(at: CGPoint(x: 80, y: 90))
+        guard let activeField = view.activeTextField else {
+            XCTFail("Expected activeTextField after beginInlineTextEditing")
+            return
+        }
+        canvas.annotations = [
+            AnnotationItem(
+                mode: .blur,
+                startPoint: CGPoint(x: 50, y: 50),
+                endPoint: CGPoint(x: 200, y: 170),
+                strokeColor: .blue,
+                lineWeight: 6.0,
+                blurStyle: .gaussian
+            )
+        ]
+        view.syncBackdropBlurViews()
+        if let orderedBackdrop = view.backdropBlurViews.values.first,
+           let backdropIndex = view.subviews.firstIndex(of: orderedBackdrop) {
+            if let textFieldIndex = view.subviews.firstIndex(of: activeField) {
+                XCTAssertLessThan(backdropIndex, textFieldIndex)
+            } else {
+                XCTFail("Expected activeTextField in canvas subviews")
+            }
+        } else {
+            XCTFail("Expected BackdropBlurRegionView mounted below activeTextField")
+        }
+        view.cancelActiveTextEditing()
+
+        view.removeAllBackdropBlurViews()
+        XCTAssertTrue(view.backdropBlurViews.isEmpty)
+
+        let overlayCanvas = AnnotationCanvasState()
+        overlayCanvas.annotations = [
+            AnnotationItem(
+                mode: .blur,
+                startPoint: CGPoint(x: 50, y: 50),
+                endPoint: CGPoint(x: 160, y: 140),
+                strokeColor: .blue,
+                lineWeight: 6.0,
+                blurStyle: .gaussian
+            )
+        ]
+        let overlay = AnnotateOverlayController(settings: settings, shortcutManager: shortcuts, canvasState: overlayCanvas)
+        overlay.showAnnotation()
+        XCTAssertEqual(overlay.canvasView?.backdropBlurViews.count, 1)
+        if let overlayView = overlay.canvasView,
+           let overlayPNG = Screenshotter.renderViewToPNGData(overlayView),
+           let overlayCG = NSBitmapImageRep(data: overlayPNG)?.cgImage {
+            let scaleX = Double(overlayCG.width) / Double(max(1.0, overlayView.bounds.width))
+            let scaleY = Double(overlayCG.height) / Double(max(1.0, overlayView.bounds.height))
+            let sampleX = Int((105.0 * scaleX).rounded())
+            let sampleY = Int((Double(overlayView.bounds.height - 95.0) * scaleY).rounded())
+            if let overlayPx = rgbaPixel(in: overlayCG, at: (x: sampleX, y: sampleY)) {
+                XCTAssertEqual(overlayPx.a, 255)
+                XCTAssertLessThan(overlayPx.g, 120)
+            } else {
+                XCTFail("Expected readable pixel inside windowed overlay blur export")
+            }
+        } else {
+            XCTFail("Expected PNG export from windowed AnnotateOverlayController canvasView")
+        }
+        overlay.hideAnnotation()
+        XCTAssertEqual(overlay.canvasView?.backdropBlurViews.count, 0)
+    }
+
+    private func makeQuadrantTestImage(width: Int, height: Int) -> CGImage? {
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        let halfW = max(1, width / 2)
+        let halfH = max(1, height / 2)
+        for y in 0..<height {
+            for x in 0..<width {
+                let offset = (y * width + x) * 4
+                let isLeft = x < halfW
+                let isTop = y < halfH
+                if isLeft && isTop {
+                    bytes[offset] = 240
+                    bytes[offset + 1] = 20
+                    bytes[offset + 2] = 20
+                } else if !isLeft && isTop {
+                    bytes[offset] = 20
+                    bytes[offset + 1] = 230
+                    bytes[offset + 2] = 30
+                } else if isLeft && !isTop {
+                    bytes[offset] = 20
+                    bytes[offset + 1] = 40
+                    bytes[offset + 2] = 245
+                } else {
+                    bytes[offset] = 240
+                    bytes[offset + 1] = 220
+                    bytes[offset + 2] = 20
+                }
+                bytes[offset + 3] = 255
+            }
+        }
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        return bytes.withUnsafeMutableBytes { rawBuffer in
+            guard let context = CGContext(
+                data: rawBuffer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: space,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return nil
+            }
+            return context.makeImage()
+        }
+    }
+
     private func makeTestSourceImage(size: Int) -> CGImage? {
         var bytes = [UInt8](repeating: 0, count: size * size * 4)
         let half = max(1, size / 2)

@@ -1,6 +1,8 @@
 import AppKit
 import Combine
 import CoreEngine
+import CoreImage
+import CoreMedia
 import ScreenCaptureKit
 
 private func makeShapeCGPath(shape: OverlayShape, bounds: CGRect) -> CGPath {
@@ -399,36 +401,207 @@ public final class CursorSpotlightWindowController {
 }
 
 public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
-    public private(set) var latestFrame: CGImage?
+    private static let accessLock = NSLock()
+    private static var hasRequestedCaptureAccess = false
+
+    private let frameLock = NSLock()
+    private var storedLatestFrame: CGImage?
+    private var storedDisplayFrame: CGRect = .null
+    private var activeStreamState = false
+    private var streamGeneration: UInt64 = 0
     private var stream: SCStream?
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private let videoQueue = DispatchQueue(label: "presentify.screencapture.queue")
 
-    public func startStream(excludingWindowID: CGWindowID?) {
-        guard Bundle.main.bundleURL.pathExtension == "app" else { return }
-        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, _ in
-            guard let self, let content, let display = content.displays.first else { return }
-            let excludedWindows = content.windows.filter { window in
-                guard let excludingWindowID else { return false }
-                return window.windowID == excludingWindowID
+    public var onFirstFrameCaptured: (() -> Void)?
+
+    deinit {
+        stopStream()
+    }
+
+    public var latestFrame: CGImage? {
+        frameLock.lock()
+        defer { frameLock.unlock() }
+        return storedLatestFrame
+    }
+
+    public var capturedDisplayFrame: CGRect {
+        frameLock.lock()
+        defer { frameLock.unlock() }
+        return storedDisplayFrame
+    }
+
+    public func updateCapturedFrame(_ frame: CGImage?, displayFrame: CGRect) {
+        let becameAvailable: Bool = {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            let transitionedFromNil = storedLatestFrame == nil && frame != nil
+            storedLatestFrame = frame
+            storedDisplayFrame = frame == nil ? .null : displayFrame
+            return transitionedFromNil
+        }()
+        guard becameAvailable else { return }
+        if Thread.isMainThread {
+            onFirstFrameCaptured?()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.onFirstFrameCaptured?()
             }
+        }
+    }
+
+    public func requestCaptureAccessIfNeeded() -> Bool {
+        if CGPreflightScreenCaptureAccess() {
+            return true
+        }
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            return false
+        }
+        let shouldRequest: Bool = {
+            Self.accessLock.lock()
+            defer { Self.accessLock.unlock() }
+            guard !Self.hasRequestedCaptureAccess else { return false }
+            Self.hasRequestedCaptureAccess = true
+            return true
+        }()
+        if shouldRequest {
+            _ = CGRequestScreenCaptureAccess()
+        }
+        return CGPreflightScreenCaptureAccess()
+    }
+
+    public func startStream(excludingWindowID: CGWindowID?) {
+        let isBundledApp = Bundle.main.bundleURL.pathExtension == "app"
+        guard isBundledApp && requestCaptureAccessIfNeeded() else { return }
+
+        let generation: UInt64? = {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            guard !activeStreamState else { return nil }
+            activeStreamState = true
+            streamGeneration += 1
+            return streamGeneration
+        }()
+        guard let generation else { return }
+
+        let readScreenSnapshots = { () -> (
+            screens: [(displayID: CGDirectDisplayID, frame: CGRect, scale: CGFloat)],
+            main: (frame: CGRect, scale: CGFloat)?
+        ) in
+            let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
+            let screens: [(displayID: CGDirectDisplayID, frame: CGRect, scale: CGFloat)] = NSScreen.screens.compactMap { screen in
+                guard let displayID = screen.deviceDescription[screenNumberKey] as? CGDirectDisplayID else {
+                    return nil
+                }
+                return (displayID: displayID, frame: screen.frame, scale: screen.backingScaleFactor)
+            }
+            let main = NSScreen.main.map { (frame: $0.frame, scale: $0.backingScaleFactor) }
+            return (screens: screens, main: main)
+        }
+        let screenSnapshot = Thread.isMainThread
+            ? readScreenSnapshots()
+            : DispatchQueue.main.sync(execute: readScreenSnapshots)
+
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, _ in
+            guard let self else { return }
+            guard let content, let display = content.displays.first else {
+                self.frameLock.lock()
+                if self.streamGeneration == generation {
+                    self.activeStreamState = false
+                }
+                self.frameLock.unlock()
+                return
+            }
+
+            let matchedMetrics = screenSnapshot.screens
+                .first { $0.displayID == display.displayID }
+                .map { (frame: $0.frame, scale: $0.scale) }
+                ?? screenSnapshot.main
+            let rawScale = matchedMetrics?.scale ?? 2.0
+            let scale = rawScale.isFinite ? min(max(rawScale, 1.0), 4.0) : 2.0
+            let displayFrame = matchedMetrics?.frame ?? CGRect(x: 0, y: 0, width: display.width, height: display.height)
+
+            let currentPID = ProcessInfo.processInfo.processIdentifier
+            let excludedWindows = content.windows.filter { window in
+                let isOwnProcess = window.owningApplication?.processID == currentPID
+                let isExcludedWindow = excludingWindowID != nil && window.windowID == excludingWindowID
+                return isOwnProcess || isExcludedWindow
+            }
+
             let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
             let config = SCStreamConfiguration()
-            config.width = display.width
-            config.height = display.height
-            config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+            config.width = max(1, Int((Double(display.width) * Double(scale)).rounded()))
+            config.height = max(1, Int((Double(display.height) * Double(scale)).rounded()))
+            config.minimumFrameInterval = CMTime(value: 1, timescale: 15)
             config.showsCursor = false
 
             let scStream = SCStream(filter: filter, configuration: config, delegate: self)
-            try? scStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.videoQueue)
-            scStream.startCapture(completionHandler: nil)
-            self.stream = scStream
+            do {
+                try scStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.videoQueue)
+            } catch {
+                NSLog("[ScreenCaptureManager] Failed to add stream output: %@", String(describing: error))
+                self.frameLock.lock()
+                if self.streamGeneration == generation {
+                    self.activeStreamState = false
+                }
+                self.frameLock.unlock()
+                return
+            }
+
+            let shouldStart: Bool = {
+                self.frameLock.lock()
+                defer { self.frameLock.unlock() }
+                let isCurrentGeneration = self.streamGeneration == generation
+                guard isCurrentGeneration && self.activeStreamState else { return false }
+                self.storedDisplayFrame = displayFrame
+                self.stream = scStream
+                return true
+            }()
+            guard shouldStart else { return }
+            scStream.startCapture { [weak self] error in
+                if let error {
+                    NSLog("[ScreenCaptureManager] Failed to start capture: %@", String(describing: error))
+                }
+                guard let self else {
+                    scStream.stopCapture(completionHandler: nil)
+                    return
+                }
+                let shouldStop: Bool = {
+                    self.frameLock.lock()
+                    defer { self.frameLock.unlock() }
+                    let isCurrent = self.streamGeneration == generation && self.activeStreamState
+                    let isSameStream = self.stream === scStream
+                    if error != nil {
+                        if isCurrent && isSameStream {
+                            self.activeStreamState = false
+                            self.stream = nil
+                            self.storedLatestFrame = nil
+                            self.storedDisplayFrame = .null
+                        }
+                        return false
+                    }
+                    return !isCurrent || !isSameStream
+                }()
+                if shouldStop {
+                    scStream.stopCapture(completionHandler: nil)
+                }
+            }
         }
     }
 
     public func stopStream() {
-        stream?.stopCapture(completionHandler: nil)
-        stream = nil
-        latestFrame = nil
+        let existingStream: SCStream? = {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            streamGeneration += 1
+            activeStreamState = false
+            let current = stream
+            stream = nil
+            storedLatestFrame = nil
+            storedDisplayFrame = .null
+            return current
+        }()
+        existingStream?.stopCapture(completionHandler: nil)
     }
 
     public func captureRegionAround(
@@ -436,14 +609,26 @@ public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDeleg
         captureSize: CGSize,
         excludingWindowID: CGWindowID?
     ) -> CGImage? {
+        let width = max(4.0, captureSize.width)
+        let height = max(4.0, captureSize.height)
+        let appKitRect = CGRect(
+            x: screenPoint.x - width * 0.5,
+            y: screenPoint.y - height * 0.5,
+            width: width,
+            height: height
+        )
+        if let streamedCrop = captureScreenRect(appKitRect, excludingWindowID: excludingWindowID) {
+            return streamedCrop
+        }
+
         guard let mainScreen = NSScreen.main else { return nil }
         let screenHeight = mainScreen.frame.height
         let flippedY = screenHeight - screenPoint.y
         let captureRect = CGRect(
-            x: screenPoint.x - captureSize.width * 0.5,
-            y: flippedY - captureSize.height * 0.5,
-            width: max(4.0, captureSize.width),
-            height: max(4.0, captureSize.height)
+            x: screenPoint.x - width * 0.5,
+            y: flippedY - height * 0.5,
+            width: width,
+            height: height
         )
 
         if let excluded = excludingWindowID, excluded != 0 {
@@ -474,38 +659,61 @@ public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDeleg
         let hasStandardSize = standardized.size.width.isFinite && standardized.size.height.isFinite
         guard hasStandardOrigin && hasStandardSize else { return nil }
 
-        let screensUnion = NSScreen.screens.map(\.frame).reduce(CGRect.null) { $0.union($1) }
-        let clipped = screensUnion.isNull ? standardized : standardized.intersection(screensUnion)
-        let isValidClipped = !clipped.isNull && !clipped.isInfinite
+        let (frame, displayFrame): (CGImage?, CGRect) = {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            return (storedLatestFrame, storedDisplayFrame)
+        }()
+
+        let isValidDisplayFrame = !displayFrame.isNull && !displayFrame.isEmpty
+        let hasPositiveDisplaySize = displayFrame.width > 0 && displayFrame.height > 0
+        let hasFiniteDisplayOrigin = displayFrame.origin.x.isFinite && displayFrame.origin.y.isFinite
+        let hasFiniteDisplaySize = displayFrame.size.width.isFinite && displayFrame.size.height.isFinite
+        guard let frame, isValidDisplayFrame else { return nil }
+        guard hasPositiveDisplaySize && hasFiniteDisplayOrigin else { return nil }
+        guard hasFiniteDisplaySize else { return nil }
+
+        let clipped = standardized.intersection(displayFrame)
+        let isValidClipped = !clipped.isNull && !clipped.isEmpty
+        let isClippedFinite = !clipped.isInfinite
         let hasMinimumSize = clipped.width >= 2.0 && clipped.height >= 2.0
         let isWithinMaxSize = clipped.width <= 8192.0 && clipped.height <= 8192.0
-        guard isValidClipped && hasMinimumSize else { return nil }
-        guard isWithinMaxSize else { return nil }
+        guard isValidClipped && isClippedFinite else { return nil }
+        guard hasMinimumSize && isWithinMaxSize else { return nil }
 
-        guard let referenceHeight = NSScreen.screens.first?.frame.height ?? NSScreen.main?.frame.height else {
-            return nil
-        }
+        let scaleX = CGFloat(frame.width) / displayFrame.width
+        let scaleY = CGFloat(frame.height) / displayFrame.height
+        let hasValidScaleX = scaleX.isFinite && scaleX > 0
+        let hasValidScaleY = scaleY.isFinite && scaleY > 0
+        guard hasValidScaleX && hasValidScaleY else { return nil }
 
-        let quartzRect = CGRect(
-            x: clipped.origin.x,
-            y: referenceHeight - clipped.maxY,
-            width: clipped.width,
-            height: clipped.height
-        )
-        if let excluded = excludingWindowID, excluded != 0 {
-            return CGWindowListCreateImage(
-                quartzRect,
-                .optionOnScreenBelowWindow,
-                excluded,
-                [.bestResolution]
-            )
+        let localX = clipped.minX - displayFrame.minX
+        let localTopY = displayFrame.maxY - clipped.maxY
+        let rawPixelRect = CGRect(
+            x: localX * scaleX,
+            y: localTopY * scaleY,
+            width: clipped.width * scaleX,
+            height: clipped.height * scaleY
+        ).integral
+        let imageBounds = CGRect(x: 0, y: 0, width: frame.width, height: frame.height)
+        let pixelRect = rawPixelRect.intersection(imageBounds)
+        let isValidPixelRect = !pixelRect.isNull && !pixelRect.isEmpty
+        let hasPixelDimensions = pixelRect.width >= 1.0 && pixelRect.height >= 1.0
+        guard isValidPixelRect && hasPixelDimensions else { return nil }
+        return frame.cropping(to: pixelRect)
+    }
+
+    public func stream(_ stream: SCStream, didStopWithError error: Error) {
+        NSLog("[ScreenCaptureManager] Stream stopped with error: %@", String(describing: error))
+        frameLock.lock()
+        if self.stream === stream {
+            streamGeneration += 1
+            activeStreamState = false
+            self.stream = nil
+            storedLatestFrame = nil
+            storedDisplayFrame = .null
         }
-        return CGWindowListCreateImage(
-            quartzRect,
-            .optionOnScreenOnly,
-            kCGNullWindowID,
-            [.bestResolution]
-        )
+        frameLock.unlock()
     }
 
     public func stream(
@@ -513,12 +721,34 @@ public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDeleg
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
     ) {
-        guard outputType == .screen,
+        guard outputType == .screen else { return }
+        let generation: UInt64? = {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            let isMatchingActiveStream = activeStreamState && self.stream === stream
+            guard isMatchingActiveStream else { return nil }
+            return streamGeneration
+        }()
+        guard let generation,
               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext(options: nil)
-        if let cgImg = context.createCGImage(ciImage, from: ciImage.extent) {
-            latestFrame = cgImg
+        guard let cgImg = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+
+        let transitionedFromNil: Bool = {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            let isMatchingActiveStream = activeStreamState && self.stream === stream
+            let isSameGeneration = streamGeneration == generation
+            let hasValidDisplayFrame = !storedDisplayFrame.isNull && !storedDisplayFrame.isEmpty
+            let canAcceptFrame = isMatchingActiveStream && isSameGeneration
+            guard canAcceptFrame && hasValidDisplayFrame else { return false }
+            let transitionedFromNil = storedLatestFrame == nil
+            storedLatestFrame = cgImg
+            return transitionedFromNil
+        }()
+        guard transitionedFromNil else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onFirstFrameCaptured?()
         }
     }
 }
