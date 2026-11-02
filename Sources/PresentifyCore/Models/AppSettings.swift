@@ -73,6 +73,9 @@ public final class AppSettings: ObservableObject {
     @Published public var currentDrawMode: DrawMode {
         didSet { persistCodable(currentDrawMode, forKey: Keys.currentDrawMode) }
     }
+    @Published public var blurStyle: BlurStyle {
+        didSet { persistCodable(blurStyle, forKey: Keys.blurStyle) }
+    }
     @Published public var minLineWeight: Double {
         didSet { persist(minLineWeight, forKey: Keys.minLineWeight) }
     }
@@ -389,6 +392,7 @@ public final class AppSettings: ObservableObject {
         self.enableGradients = loadedRandom && Self.loadBool(from: defaults, key: Keys.enableGradients, fallback: false)
         self.activeGradient = Self.loadCodable(from: defaults, key: Keys.activeGradient, fallback: GradientGenerator.presets[0])
         self.currentDrawMode = Self.loadCodable(from: defaults, key: Keys.currentDrawMode, fallback: .freeHand)
+        self.blurStyle = Self.loadCodable(from: defaults, key: Keys.blurStyle, fallback: .gaussian)
         self.minLineWeight = minWeight
         self.maxLineWeight = maxWeight
         self.lineWeight = min(max(Self.loadDouble(from: defaults, key: Keys.lineWeight, fallback: 6.0), minWeight), maxWeight)
@@ -563,6 +567,7 @@ public final class AppSettings: ObservableObject {
         enableGradients = false
         activeGradient = GradientGenerator.presets[0]
         currentDrawMode = .freeHand
+        blurStyle = .gaussian
         minLineWeight = 2.0
         maxLineWeight = 24.0
         lineWeight = 6.0
@@ -687,6 +692,7 @@ public final class AppSettings: ObservableObject {
         static let enableGradients = "presentify.enableGradients"
         static let activeGradient = "presentify.activeGradient"
         static let currentDrawMode = "presentify.currentDrawMode"
+        static let blurStyle = "presentify.blurStyle"
         static let minLineWeight = "presentify.minLineWeight"
         static let maxLineWeight = "presentify.maxLineWeight"
         static let lineWeight = "presentify.lineWeight"
@@ -742,7 +748,7 @@ public final class AppSettings: ObservableObject {
             hasCompletedWelcomeTour, interactiveModeKey,
             annotateInteractiveMode, selectedSettingsTab, favColors,
             selectedColorIndex, useRandomColors, enableGradients, activeGradient,
-            currentDrawMode, minLineWeight, maxLineWeight, lineWeight,
+            currentDrawMode, blurStyle, minLineWeight, maxLineWeight, lineWeight,
             autoEraseEnabled, autoEraseDelay, showAnnotateControls,
             annotateControlsVertical, autoHideAnnotateControls, whiteboardEnabled,
             whiteboardColor, whiteboardOpacity, touchDrawEnabled,

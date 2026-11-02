@@ -43,6 +43,7 @@ public enum ShortcutCommand: String, CaseIterable, Codable, Identifiable, Sendab
     case text
     case clearAnnotate
     case highlighter
+    case blur
     case decreaseLineWeight
     case increaseLineWeight
     case setLineWeight
@@ -82,6 +83,7 @@ public enum ShortcutCommand: String, CaseIterable, Codable, Identifiable, Sendab
              .text,
              .clearAnnotate,
              .highlighter,
+             .blur,
              .decreaseLineWeight,
              .increaseLineWeight,
              .setLineWeight,
@@ -121,6 +123,7 @@ public enum ShortcutCommand: String, CaseIterable, Codable, Identifiable, Sendab
         case .text: return "Text"
         case .clearAnnotate: return "Clear Annotations"
         case .highlighter: return "Highlighter"
+        case .blur: return "Blur"
         case .decreaseLineWeight: return "Decrease Line Weight"
         case .increaseLineWeight: return "Increase Line Weight"
         case .setLineWeight: return "Set Line Weight (1-9)"
@@ -163,6 +166,7 @@ public enum ShortcutCommand: String, CaseIterable, Codable, Identifiable, Sendab
         case .text: return KeyBinding(keyCode: 0x11, modifiers: 0)
         case .clearAnnotate: return KeyBinding(keyCode: 0x33, modifiers: 0)
         case .highlighter: return KeyBinding(keyCode: 0x04, modifiers: 0)
+        case .blur: return KeyBinding(keyCode: 0x0B, modifiers: 0)
         case .decreaseLineWeight: return KeyBinding(keyCode: 0x21, modifiers: 0)
         case .increaseLineWeight: return KeyBinding(keyCode: 0x1E, modifiers: 0)
         case .setLineWeight: return KeyBinding(keyCode: 0x12, modifiers: ctrlOpt)
