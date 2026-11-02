@@ -10,6 +10,7 @@ public enum DrawMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case circle
     case text
     case highlighter
+    case blur
 
     public var id: String { rawValue }
 
@@ -21,6 +22,7 @@ public enum DrawMode: String, Codable, CaseIterable, Identifiable, Sendable {
         case .circle: return "Circle"
         case .text: return "Text"
         case .highlighter: return "Highlighter"
+        case .blur: return "Blur"
         }
     }
 
@@ -34,10 +36,25 @@ public enum DrawMode: String, Codable, CaseIterable, Identifiable, Sendable {
         case .circle: return "circle"
         case .text: return "textformat"
         case .highlighter: return "highlighter"
+        case .blur: return "checkerboard.rectangle"
         }
     }
 
     public var iconName: String { systemImage }
+}
+
+public enum BlurStyle: String, Codable, CaseIterable, Identifiable, Sendable {
+    case gaussian
+    case pixelate
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .gaussian: return "Gaussian Blur"
+        case .pixelate: return "Pixelate"
+        }
+    }
 }
 
 public enum OverlayShape: Int, Codable, CaseIterable, Identifiable, Sendable {
@@ -294,6 +311,7 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
     public var text: String
     public var fontName: String
     public var fontSize: Double
+    public var blurStyle: BlurStyle? = nil
 
     public init(
         id: UUID = UUID(),
@@ -311,7 +329,8 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         createdAt: TimeInterval = Date().timeIntervalSince1970,
         text: String = "",
         fontName: String = AnnotateFontOption.systemDefault.fontName,
-        fontSize: Double = 24.0
+        fontSize: Double = 24.0,
+        blurStyle: BlurStyle? = nil
     ) {
         self.id = id
         self.mode = mode
@@ -329,11 +348,18 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         self.text = text
         self.fontName = fontName
         self.fontSize = fontSize
+        self.blurStyle = blurStyle
+    }
+
+    public var effectiveBlurStyle: BlurStyle {
+        let baseStyle = blurStyle ?? .gaussian
+        guard isFilled else { return baseStyle }
+        return baseStyle == .gaussian ? .pixelate : .gaussian
     }
 
     public var boundingRect: CGRect {
         switch mode {
-        case .rectangle, .circle:
+        case .rectangle, .circle, .blur:
             let ceRect = ce_make_rect(
                 CEPoint(x: Double(startPoint.x), y: Double(startPoint.y)),
                 CEPoint(x: Double(endPoint.x), y: Double(endPoint.y)),
@@ -400,6 +426,7 @@ public final class AnnotationCanvasState: ObservableObject {
         isAutoErase: Bool = false,
         isShiftDown: Bool = false,
         isOptionDown: Bool = false,
+        blurStyle: BlurStyle? = nil,
         now: TimeInterval = Date().timeIntervalSince1970
     ) {
         selectedIDs.removeAll()
@@ -420,7 +447,8 @@ public final class AnnotationCanvasState: ObservableObject {
             lineWeight: effectiveWeight,
             isHighlighter: effectiveHighlighter,
             isAutoErase: isAutoErase,
-            createdAt: now
+            createdAt: now,
+            blurStyle: mode == .blur ? blurStyle : nil
         )
     }
 
@@ -456,7 +484,7 @@ public final class AnnotationCanvasState: ObservableObject {
                 draft.endPoint = point
                 draft.points = [draft.startPoint, point]
             }
-        case .rectangle, .circle:
+        case .rectangle, .circle, .blur:
             if isShiftDown {
                 let constrainedRect = ce_make_rect(
                     CEPoint(x: Double(draft.startPoint.x), y: Double(draft.startPoint.y)),
@@ -483,6 +511,13 @@ public final class AnnotationCanvasState: ObservableObject {
     public func finishStroke() {
         guard var draft = activeDraft else { return }
         activeDraft = nil
+
+        if draft.mode == .blur {
+            let bounds = draft.boundingRect
+            let hasFiniteBounds = bounds.width.isFinite && bounds.height.isFinite
+            let hasMinimumBlurSize = bounds.width >= 2.0 && bounds.height >= 2.0
+            guard hasFiniteBounds && hasMinimumBlurSize else { return }
+        }
 
         let isFreeformStroke = (draft.mode == .freeHand || draft.mode == .highlighter) && !draft.isConstrained
         if isFreeformStroke && draft.points.count >= 3 {
@@ -561,6 +596,15 @@ public final class AnnotationCanvasState: ObservableObject {
                 if ce_hit_test_rect(rect, item.isFilled, item.lineWeight, testPoint, tolerance) {
                     return item.id
                 }
+            case .blur:
+                let rect = ce_make_rect(
+                    CEPoint(x: Double(item.startPoint.x), y: Double(item.startPoint.y)),
+                    CEPoint(x: Double(item.endPoint.x), y: Double(item.endPoint.y)),
+                    item.isConstrained
+                )
+                if ce_hit_test_rect(rect, true, item.lineWeight, testPoint, tolerance) {
+                    return item.id
+                }
             case .text:
                 let bounds = item.boundingRect
                 let rect = CERect(
@@ -617,7 +661,7 @@ public final class AnnotationCanvasState: ObservableObject {
                 if intersects {
                     matched.insert(item.id)
                 }
-            case .rectangle, .circle, .text:
+            case .rectangle, .circle, .text, .blur:
                 if normalized.intersects(item.boundingRect) {
                     matched.insert(item.id)
                 }
@@ -740,8 +784,22 @@ public final class AnnotationCanvasState: ObservableObject {
         guard let decoded = try? JSONDecoder().decode([AnnotationItem].self, from: data) else {
             return false
         }
+        var sanitized: [AnnotationItem] = []
+        sanitized.reserveCapacity(decoded.count)
+        for var item in decoded {
+            for point in [item.startPoint, item.endPoint] + item.points {
+                let isFinitePoint = point.x.isFinite && point.y.isFinite
+                let isWithinCoordRange = abs(point.x) <= 32_768.0 && abs(point.y) <= 32_768.0
+                guard isFinitePoint && isWithinCoordRange else {
+                    return false
+                }
+            }
+            item.lineWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 1.0), 64.0) : 6.0
+            item.fontSize = item.fontSize.isFinite ? min(max(item.fontSize, 8.0), 200.0) : 24.0
+            sanitized.append(item)
+        }
         recordUndoSnapshot()
-        annotations = decoded
+        annotations = sanitized
         selectedIDs.removeAll()
         selectionRectangle = nil
         return true

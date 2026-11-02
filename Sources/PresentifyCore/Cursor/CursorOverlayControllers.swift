@@ -462,6 +462,52 @@ public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDeleg
         )
     }
 
+    public func captureScreenRect(_ screenRect: CGRect, excludingWindowID: CGWindowID?) -> CGImage? {
+        let isNonSpecialRect = !screenRect.isNull && !screenRect.isInfinite
+        let hasFiniteOrigin = screenRect.origin.x.isFinite && screenRect.origin.y.isFinite
+        let hasFiniteSize = screenRect.size.width.isFinite && screenRect.size.height.isFinite
+        guard isNonSpecialRect && hasFiniteOrigin else { return nil }
+        guard hasFiniteSize else { return nil }
+
+        let standardized = screenRect.standardized
+        let hasStandardOrigin = standardized.origin.x.isFinite && standardized.origin.y.isFinite
+        let hasStandardSize = standardized.size.width.isFinite && standardized.size.height.isFinite
+        guard hasStandardOrigin && hasStandardSize else { return nil }
+
+        let screensUnion = NSScreen.screens.map(\.frame).reduce(CGRect.null) { $0.union($1) }
+        let clipped = screensUnion.isNull ? standardized : standardized.intersection(screensUnion)
+        let isValidClipped = !clipped.isNull && !clipped.isInfinite
+        let hasMinimumSize = clipped.width >= 2.0 && clipped.height >= 2.0
+        let isWithinMaxSize = clipped.width <= 8192.0 && clipped.height <= 8192.0
+        guard isValidClipped && hasMinimumSize else { return nil }
+        guard isWithinMaxSize else { return nil }
+
+        guard let referenceHeight = NSScreen.screens.first?.frame.height ?? NSScreen.main?.frame.height else {
+            return nil
+        }
+
+        let quartzRect = CGRect(
+            x: clipped.origin.x,
+            y: referenceHeight - clipped.maxY,
+            width: clipped.width,
+            height: clipped.height
+        )
+        if let excluded = excludingWindowID, excluded != 0 {
+            return CGWindowListCreateImage(
+                quartzRect,
+                .optionOnScreenBelowWindow,
+                excluded,
+                [.bestResolution]
+            )
+        }
+        return CGWindowListCreateImage(
+            quartzRect,
+            .optionOnScreenOnly,
+            kCGNullWindowID,
+            [.bestResolution]
+        )
+    }
+
     public func stream(
         _ stream: SCStream,
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,

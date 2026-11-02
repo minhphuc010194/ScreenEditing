@@ -218,6 +218,7 @@ final class PresentifyCoreTests: XCTestCase {
         let settings = AppSettings(defaults: testDefaults)
         XCTAssertEqual(settings.favColors.count, 5)
         XCTAssertEqual(settings.lineWeight, 6.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.blurStyle, .gaussian)
 
         settings.setLineWeightFromDigit(1)
         XCTAssertEqual(settings.lineWeight, settings.minLineWeight, accuracy: 1e-6)
@@ -230,6 +231,7 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(settings.cursorHighlightSize, 75.0, accuracy: 1e-6)
         settings.increaseZoomLevel(step: 0.5)
         XCTAssertEqual(settings.zoomLevel, 2.5, accuracy: 1e-6)
+        settings.blurStyle = .pixelate
 
         settings.selectRandomColors()
         XCTAssertTrue(settings.useRandomColors)
@@ -253,17 +255,21 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(reloaded.lineWeight, 20.0, accuracy: 1e-6)
         XCTAssertEqual(reloaded.cursorHighlightSize, 75.0, accuracy: 1e-6)
         XCTAssertEqual(reloaded.zoomLevel, 2.5, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.blurStyle, .pixelate)
+        XCTAssertNotNil(testDefaults.object(forKey: "presentify.blurStyle"))
 
         reloaded.restoreDefaults()
         XCTAssertEqual(reloaded.lineWeight, 6.0, accuracy: 1e-6)
         XCTAssertEqual(reloaded.cursorHighlightSize, 60.0, accuracy: 1e-6)
         XCTAssertEqual(reloaded.zoomLevel, 2.0, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.blurStyle, .gaussian)
+        XCTAssertEqual(AppSettings(defaults: testDefaults).blurStyle, .gaussian)
     }
 
-    func testShortcutManagerAll32DefaultBindingsAndCommandMatching() {
-        XCTAssertEqual(ShortcutCommand.allCases.count, 32)
+    func testShortcutManagerAll33DefaultBindingsAndCommandMatching() {
+        XCTAssertEqual(ShortcutCommand.allCases.count, 33)
         XCTAssertEqual(ShortcutCategory.global.commands.count, 5)
-        XCTAssertEqual(ShortcutCategory.annotate.commands.count, 22)
+        XCTAssertEqual(ShortcutCategory.annotate.commands.count, 23)
         XCTAssertEqual(ShortcutCategory.cursor.commands.count, 5)
 
         let manager = ShortcutManager(defaults: testDefaults)
@@ -273,6 +279,7 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(manager.binding(for: .toggleSpotlightCursor).displayString, "⌃⌥S")
         XCTAssertEqual(manager.binding(for: .toggleZoomCursor).displayString, "⌃⌥Z")
         XCTAssertEqual(manager.binding(for: .clearAnnotate).displayString, "Delete")
+        XCTAssertEqual(manager.binding(for: .blur).displayString, "B")
         XCTAssertEqual(manager.binding(for: .setLineWeight).displayString, "⌃⌥1")
         XCTAssertEqual(manager.binding(for: .copyScreenshot).displayString, "⌘C")
         XCTAssertEqual(manager.binding(for: .pasteAnnotations).displayString, "⌘V")
@@ -288,6 +295,10 @@ final class PresentifyCoreTests: XCTestCase {
         let arrowMatch = manager.matchLocalAnnotateCommand(keyCode: 0x00, modifiers: 0)
         XCTAssertEqual(arrowMatch?.command, .arrow)
         XCTAssertNil(arrowMatch?.lineWeightDigit)
+
+        let blurMatch = manager.matchLocalAnnotateCommand(keyCode: 0x0B, modifiers: 0)
+        XCTAssertEqual(blurMatch?.command, .blur)
+        XCTAssertNil(blurMatch?.lineWeightDigit)
 
         XCTAssertNil(manager.matchCursorCommand(keyCode: 0x1D, modifiers: KeyBinding.optionMask, isZoomActive: false))
         XCTAssertEqual(
@@ -638,5 +649,728 @@ final class PresentifyCoreTests: XCTestCase {
         } else {
             XCTFail("Expected user-initiated check to show update even if previously skipped")
         }
+    }
+
+    func testBlurToolShortcutGeometryModifiersHitTestAndLegacySession() {
+        XCTAssertEqual(DrawMode.blur.title, "Blur")
+        XCTAssertEqual(DrawMode.blur.systemImage, "checkerboard.rectangle")
+        XCTAssertTrue(DrawMode.allCases.contains(.blur))
+        XCTAssertEqual(BlurStyle.gaussian.title, "Gaussian Blur")
+        XCTAssertEqual(BlurStyle.pixelate.title, "Pixelate")
+        XCTAssertEqual(BlurStyle.allCases, [.gaussian, .pixelate])
+
+        let optionTip = AnnotateShortcutsView.modifierTips.first { $0.symbol == "⌥ Option" }
+        XCTAssertEqual(
+            optionTip?.description,
+            "Hold while drawing a rectangle/circle to fill, or blur to switch Gaussian/Pixelate."
+        )
+
+        let settings = AppSettings(defaults: testDefaults)
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let canvasView = AnnotateCanvasView(
+            frame: NSRect(x: 0, y: 0, width: 300, height: 300),
+            canvasState: canvas,
+            settings: settings,
+            shortcutManager: shortcuts
+        )
+
+        XCTAssertTrue(canvasView.handleKeyCommand(keyCode: 0x0B, modifiers: 0))
+        XCTAssertEqual(settings.currentDrawMode, .blur)
+
+        canvas.beginStroke(
+            at: CGPoint(x: 120, y: 150),
+            mode: .blur,
+            color: .red,
+            lineWeight: 8.0,
+            isAutoErase: true,
+            blurStyle: .gaussian,
+            now: 50.0
+        )
+        canvas.updateStroke(to: CGPoint(x: 40, y: 50))
+        canvas.finishStroke()
+
+        XCTAssertEqual(canvas.annotations.count, 1)
+        let firstBlur = canvas.annotations[0]
+        XCTAssertEqual(firstBlur.boundingRect, CGRect(x: 40, y: 50, width: 80, height: 100))
+        XCTAssertEqual(firstBlur.effectiveBlurStyle, .gaussian)
+        XCTAssertEqual(canvas.hitTestAnnotation(at: CGPoint(x: 80, y: 100)), firstBlur.id)
+        XCTAssertNil(canvas.hitTestAnnotation(at: CGPoint(x: 5, y: 5)))
+
+        canvas.beginStroke(
+            at: CGPoint(x: 100, y: 100),
+            mode: .blur,
+            color: .blue,
+            lineWeight: 10.0,
+            isShiftDown: true,
+            isOptionDown: true,
+            blurStyle: .gaussian,
+            now: 60.0
+        )
+        canvas.updateStroke(to: CGPoint(x: 40, y: 60), isShiftDown: true, isOptionDown: true)
+        canvas.finishStroke()
+
+        let constrainedBlur = canvas.annotations[1]
+        XCTAssertEqual(constrainedBlur.boundingRect.width, 60.0, accuracy: 1e-6)
+        XCTAssertEqual(constrainedBlur.boundingRect.height, 60.0, accuracy: 1e-6)
+        XCTAssertEqual(constrainedBlur.effectiveBlurStyle, .pixelate)
+
+        let invertedPixelate = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 20, y: 20),
+            isFilled: true,
+            strokeColor: .red,
+            blurStyle: .pixelate
+        )
+        XCTAssertEqual(invertedPixelate.effectiveBlurStyle, .gaussian)
+
+        let nilBlurDefault = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 20, y: 20),
+            isFilled: false,
+            strokeColor: .red
+        )
+        XCTAssertEqual(nilBlurDefault.effectiveBlurStyle, .gaussian)
+
+        canvas.selectAnnotations(in: CGRect(x: 70, y: 90, width: 15, height: 15))
+        XCTAssertTrue(canvas.selectedIDs.contains(firstBlur.id))
+        canvas.selectedIDs = [firstBlur.id]
+        canvas.moveSelectedAnnotations(by: CGSize(width: 10, height: -5))
+        XCTAssertEqual(canvas.annotations[0].boundingRect, CGRect(x: 50, y: 45, width: 80, height: 100))
+
+        XCTAssertTrue(canvas.copySelectedAnnotations())
+        canvas.pasteAnnotations(offsetStep: 12.0)
+        XCTAssertEqual(canvas.annotations.count, 3)
+        XCTAssertEqual(canvas.annotations[2].mode, .blur)
+
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations.count, 2)
+        canvas.redo()
+        XCTAssertEqual(canvas.annotations.count, 3)
+
+        canvas.pruneExpiredAnnotations(now: 55.0, delay: 3.0)
+        XCTAssertEqual(canvas.annotations.count, 2)
+
+        let legacyJSON = """
+        [
+          {
+            "id": "E621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "rectangle",
+            "points": [[10, 20], [60, 80]],
+            "startPoint": [10, 20],
+            "endPoint": [60, 80],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 1, "green": 0, "blue": 0, "alpha": 1},
+            "lineWeight": 6,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 100,
+            "text": "",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 24
+          }
+        ]
+        """.data(using: .utf8)!
+        XCTAssertTrue(canvas.importSessionData(legacyJSON))
+        XCTAssertEqual(canvas.annotations.count, 1)
+        XCTAssertNil(canvas.annotations[0].blurStyle)
+        XCTAssertEqual(canvas.annotations[0].effectiveBlurStyle, .gaussian)
+
+        let legacyBlurJSON = """
+        [
+          {
+            "id": "A621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "blur",
+            "points": [[15, 25], [95, 105]],
+            "startPoint": [15, 25],
+            "endPoint": [95, 105],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 0, "green": 0, "blue": 1, "alpha": 1},
+            "lineWeight": 8,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 120,
+            "text": "",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 24
+          }
+        ]
+        """.data(using: .utf8)!
+        XCTAssertTrue(canvas.importSessionData(legacyBlurJSON))
+        XCTAssertEqual(canvas.annotations.count, 1)
+        XCTAssertEqual(canvas.annotations[0].mode, .blur)
+        XCTAssertNil(canvas.annotations[0].blurStyle)
+        XCTAssertEqual(canvas.annotations[0].effectiveBlurStyle, .gaussian)
+
+        let zeroClickCanvas = AnnotationCanvasState()
+        zeroClickCanvas.beginStroke(
+            at: CGPoint(x: 80, y: 80),
+            mode: .blur,
+            color: .blue,
+            lineWeight: 6.0,
+            blurStyle: .gaussian
+        )
+        zeroClickCanvas.finishStroke()
+        XCTAssertTrue(zeroClickCanvas.annotations.isEmpty)
+        XCTAssertTrue(zeroClickCanvas.undoStack.isEmpty)
+
+        zeroClickCanvas.beginStroke(
+            at: CGPoint(x: 80, y: 80),
+            mode: .blur,
+            color: .blue,
+            lineWeight: 6.0,
+            blurStyle: .pixelate
+        )
+        zeroClickCanvas.updateStroke(to: CGPoint(x: 81.2, y: 110.0))
+        zeroClickCanvas.finishStroke()
+        XCTAssertTrue(zeroClickCanvas.annotations.isEmpty)
+        XCTAssertTrue(zeroClickCanvas.undoStack.isEmpty)
+    }
+
+    func testBlurFilterGaussianAndPixelateAndScreenCaptureBoundsGuard() {
+        let captureManager = ScreenCaptureManager()
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: 0, y: 0, width: 1.5, height: 40), excludingWindowID: nil))
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: 0, y: 0, width: 40, height: 1.5), excludingWindowID: nil))
+        XCTAssertNil(captureManager.captureScreenRect(.null, excludingWindowID: nil))
+
+        guard let sourceImage = makeTestSourceImage(size: 64) else {
+            XCTFail("Expected synthetic source CGImage")
+            return
+        }
+
+        let gaussianItem = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 64, y: 64),
+            strokeColor: .blue,
+            lineWeight: 6.0,
+            blurStyle: .gaussian
+        )
+        guard let gaussianImage = AnnotateCanvasView.applyBlurFilter(to: sourceImage, item: gaussianItem) else {
+            XCTFail("Expected Gaussian filtered CGImage")
+            return
+        }
+        XCTAssertEqual(gaussianImage.width, 64)
+        XCTAssertEqual(gaussianImage.height, 64)
+
+        if let seamPixel = rgbaPixel(in: gaussianImage, at: (x: 32, y: 32)),
+           let leftEdgePixel = rgbaPixel(in: gaussianImage, at: (x: 2, y: 32)) {
+            XCTAssertGreaterThan(seamPixel.r, 50)
+            XCTAssertGreaterThan(seamPixel.b, 50)
+            XCTAssertEqual(seamPixel.a, 255)
+            XCTAssertGreaterThan(leftEdgePixel.r, 150)
+            XCTAssertEqual(leftEdgePixel.a, 255)
+        } else {
+            XCTFail("Expected readable pixels from Gaussian image")
+        }
+
+        let pixelateItem = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 64, y: 64),
+            strokeColor: .blue,
+            lineWeight: 8.0,
+            blurStyle: .pixelate
+        )
+        guard let pixelatedImage = AnnotateCanvasView.applyBlurFilter(to: sourceImage, item: pixelateItem) else {
+            XCTFail("Expected Pixelate filtered CGImage")
+            return
+        }
+        XCTAssertEqual(pixelatedImage.width, 64)
+        XCTAssertEqual(pixelatedImage.height, 64)
+
+        var equalAdjacentRedPairs = 0
+        for x in 2..<28 {
+            if let current = rgbaPixel(in: pixelatedImage, at: (x: x, y: 32)),
+               let next = rgbaPixel(in: pixelatedImage, at: (x: x + 1, y: 32)) {
+                if current.r == next.r {
+                    equalAdjacentRedPairs += 1
+                }
+            }
+        }
+        XCTAssertGreaterThanOrEqual(equalAdjacentRedPairs, 16)
+
+        let optionToggledItem = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 64, y: 64),
+            isFilled: true,
+            strokeColor: .blue,
+            lineWeight: 8.0,
+            blurStyle: .gaussian
+        )
+        if let optionImage = AnnotateCanvasView.applyBlurFilter(to: sourceImage, item: optionToggledItem),
+           let p1 = rgbaPixel(in: pixelatedImage, at: (x: 12, y: 32)),
+           let p2 = rgbaPixel(in: optionImage, at: (x: 12, y: 32)) {
+            XCTAssertEqual(p1.r, p2.r)
+            XCTAssertEqual(p1.b, p2.b)
+        } else {
+            XCTFail("Expected Option-toggled Gaussian item to match Pixelate output")
+        }
+    }
+
+    func testBlurFilterRetinaBackingScaleAndMonotonicLineWeightScaling() {
+        guard let image1x = makeTestSourceImage(size: 64),
+              let image2x = makeTestSourceImage(size: 128) else {
+            XCTFail("Expected 1x and 2x synthetic source images")
+            return
+        }
+
+        let retinaGaussItem = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 64, y: 64),
+            strokeColor: .blue,
+            lineWeight: 2.0,
+            blurStyle: .gaussian
+        )
+        XCTAssertEqual(image2x.width, 2 * Int(retinaGaussItem.boundingRect.width))
+
+        let unscaled128GaussItem = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 128, y: 128),
+            strokeColor: .blue,
+            lineWeight: 2.0,
+            blurStyle: .gaussian
+        )
+
+        guard let gauss1x = AnnotateCanvasView.applyBlurFilter(to: image1x, item: retinaGaussItem),
+              let gauss2x = AnnotateCanvasView.applyBlurFilter(to: image2x, item: retinaGaussItem),
+              let gaussUnscaled = AnnotateCanvasView.applyBlurFilter(to: image2x, item: unscaled128GaussItem),
+              let sample1x = rgbaPixel(in: gauss1x, at: (x: 24, y: 32)),
+              let sample2x = rgbaPixel(in: gauss2x, at: (x: 48, y: 64)),
+              let sampleUnscaled = rgbaPixel(in: gaussUnscaled, at: (x: 48, y: 64)) else {
+            XCTFail("Expected 1x and 2x Gaussian filtered samples")
+            return
+        }
+        XCTAssertGreaterThan(sample2x.b, 30)
+        XCTAssertLessThanOrEqual(abs(Int(sample2x.b) - Int(sample1x.b)), 6)
+        XCTAssertLessThanOrEqual(abs(Int(sample2x.r) - Int(sample1x.r)), 6)
+        XCTAssertGreaterThan(Int(sample2x.b), Int(sampleUnscaled.b) + 15)
+
+        let retinaPixItem = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 64, y: 64),
+            strokeColor: .blue,
+            lineWeight: 2.0,
+            blurStyle: .pixelate
+        )
+        guard let pix1x = AnnotateCanvasView.applyBlurFilter(to: image1x, item: retinaPixItem),
+              let pix2x = AnnotateCanvasView.applyBlurFilter(to: image2x, item: retinaPixItem),
+              let anchor1x = rgbaPixel(in: pix1x, at: (x: 16, y: 32)),
+              let anchor2x = rgbaPixel(in: pix2x, at: (x: 32, y: 64)) else {
+            XCTFail("Expected 1x and 2x Pixelate filtered samples")
+            return
+        }
+
+        var plateau1x = 0
+        for x in 0..<pix1x.width {
+            if let px = rgbaPixel(in: pix1x, at: (x: x, y: 32)) {
+                let matchesAnchor = px.r == anchor1x.r && px.b == anchor1x.b
+                if matchesAnchor {
+                    plateau1x += 1
+                }
+            }
+        }
+        var plateau2x = 0
+        for x in 0..<pix2x.width {
+            if let px = rgbaPixel(in: pix2x, at: (x: x, y: 64)) {
+                let matchesAnchor = px.r == anchor2x.r && px.b == anchor2x.b
+                if matchesAnchor {
+                    plateau2x += 1
+                }
+            }
+        }
+        XCTAssertGreaterThanOrEqual(plateau1x, 9)
+        XCTAssertGreaterThanOrEqual(plateau2x, 18)
+        XCTAssertEqual(Double(plateau2x) / 2.0, Double(plateau1x), accuracy: 2.0)
+
+        let weights: [Double] = [2.0, 3.0, 6.0, 20.0]
+        var gaussianBleeds: [UInt8] = []
+        for weight in weights {
+            let item = AnnotationItem(
+                mode: .blur,
+                startPoint: .zero,
+                endPoint: CGPoint(x: 128, y: 128),
+                strokeColor: .blue,
+                lineWeight: weight,
+                blurStyle: .gaussian
+            )
+            guard let out = AnnotateCanvasView.applyBlurFilter(to: image2x, item: item),
+                  let px = rgbaPixel(in: out, at: (x: 44, y: 64)) else {
+                XCTFail("Expected Gaussian output for weight \(weight)")
+                return
+            }
+            gaussianBleeds.append(px.b)
+        }
+        XCTAssertLessThan(gaussianBleeds[0], gaussianBleeds[1])
+        XCTAssertLessThan(gaussianBleeds[1], gaussianBleeds[2])
+        XCTAssertLessThan(gaussianBleeds[2], gaussianBleeds[3])
+
+        let pixWeights: [Double] = [2.0, 6.0, 20.0]
+        var pixTransitions: [Int] = []
+        for weight in pixWeights {
+            let item = AnnotationItem(
+                mode: .blur,
+                startPoint: .zero,
+                endPoint: CGPoint(x: 128, y: 128),
+                strokeColor: .blue,
+                lineWeight: weight,
+                blurStyle: .pixelate
+            )
+            guard let out = AnnotateCanvasView.applyBlurFilter(to: image2x, item: item) else {
+                XCTFail("Expected Pixelate output for weight \(weight)")
+                return
+            }
+            var transitions = 0
+            for x in 0..<(out.width - 1) {
+                if let c1 = rgbaPixel(in: out, at: (x: x, y: 64)),
+                   let c2 = rgbaPixel(in: out, at: (x: x + 1, y: 64)) {
+                    let changed = c1.r != c2.r || c1.b != c2.b
+                    if changed {
+                        transitions += 1
+                    }
+                }
+            }
+            pixTransitions.append(transitions)
+        }
+        XCTAssertGreaterThan(pixTransitions[0], pixTransitions[1])
+        XCTAssertGreaterThan(pixTransitions[1], pixTransitions[2])
+    }
+
+    func testBlurCanvasRenderingCachingAndFailClosedRedactionInScreenshotter() {
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateToolIndicator = false
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let view = AnnotateCanvasView(
+            frame: NSRect(x: 0, y: 0, width: 200, height: 200),
+            canvasState: canvas,
+            settings: settings,
+            shortcutManager: shortcuts
+        )
+
+        canvas.annotations = [
+            AnnotationItem(
+                mode: .rectangle,
+                startPoint: CGPoint(x: 60, y: 60),
+                endPoint: CGPoint(x: 140, y: 140),
+                isFilled: true,
+                strokeColor: RGBColor(red: 0.0, green: 1.0, blue: 0.0),
+                lineWeight: 4.0
+            ),
+            AnnotationItem(
+                mode: .blur,
+                startPoint: CGPoint(x: 60, y: 60),
+                endPoint: CGPoint(x: 140, y: 140),
+                strokeColor: .blue,
+                lineWeight: 8.0,
+                blurStyle: .gaussian
+            )
+        ]
+
+        guard let fallbackPNG = Screenshotter.renderViewToPNGData(view),
+              let fallbackCG = NSBitmapImageRep(data: fallbackPNG)?.cgImage else {
+            XCTFail("Expected PNG data for fail-closed blur fallback")
+            return
+        }
+        if let center = rgbaPixel(in: fallbackCG, at: (x: fallbackCG.width / 2, y: fallbackCG.height / 2)),
+           let outside = rgbaPixel(in: fallbackCG, at: (x: fallbackCG.width / 10, y: fallbackCG.height / 10)) {
+            XCTAssertEqual(center.a, 255)
+            XCTAssertLessThan(center.g, 120)
+            XCTAssertEqual(outside.a, 0)
+        } else {
+            XCTFail("Expected readable pixels from fallback PNG")
+        }
+
+        var captureCalls = 0
+        view.regionCaptureProvider = { _ in
+            captureCalls += 1
+            return self.makeTestSourceImage(size: 64)
+        }
+
+        canvas.annotations = [
+            AnnotationItem(
+                mode: .blur,
+                startPoint: CGPoint(x: 99.5, y: 80),
+                endPoint: CGPoint(x: 100.5, y: 120),
+                strokeColor: .blue,
+                lineWeight: 6.0
+            )
+        ]
+        _ = Screenshotter.renderViewToPNGData(view)
+        XCTAssertEqual(captureCalls, 0)
+
+        canvas.clearAll()
+        canvas.beginStroke(at: CGPoint(x: 60, y: 60), mode: .blur, color: .blue, lineWeight: 6.0, blurStyle: .gaussian)
+        canvas.updateStroke(to: CGPoint(x: 140, y: 140))
+        _ = Screenshotter.renderViewToPNGData(view)
+        XCTAssertEqual(captureCalls, 1)
+
+        canvas.finishStroke()
+        guard let capturedPNG = Screenshotter.renderViewToPNGData(view),
+              let capturedCG = NSBitmapImageRep(data: capturedPNG)?.cgImage else {
+            XCTFail("Expected PNG data for captured blur region")
+            return
+        }
+        XCTAssertEqual(captureCalls, 2)
+        if let center = rgbaPixel(in: capturedCG, at: (x: capturedCG.width / 2, y: capturedCG.height / 2)) {
+            XCTAssertEqual(center.a, 255)
+            XCTAssertGreaterThan(center.r, 40)
+            XCTAssertGreaterThan(center.b, 40)
+        } else {
+            XCTFail("Expected center pixel from captured blur PNG")
+        }
+
+        _ = Screenshotter.renderViewToPNGData(view)
+        XCTAssertEqual(captureCalls, 2)
+
+        canvas.selectedIDs = Set(canvas.annotations.map(\.id))
+        canvas.moveSelectedAnnotations(by: CGSize(width: 10, height: 0))
+        _ = Screenshotter.renderViewToPNGData(view)
+        XCTAssertEqual(captureCalls, 3)
+
+        settings.isWhiteboardActive = true
+        _ = Screenshotter.renderViewToPNGData(view)
+        XCTAssertEqual(captureCalls, 3)
+
+        settings.isWhiteboardActive = false
+        _ = Screenshotter.renderViewToPNGData(view)
+        XCTAssertEqual(captureCalls, 4)
+    }
+
+    func testBlurSessionImportValidationAndExtremeInMemoryBoundsSafety() {
+        let canvas = AnnotationCanvasState()
+        let seedItem = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 10, y: 10),
+            endPoint: CGPoint(x: 50, y: 50),
+            strokeColor: .blue,
+            lineWeight: 6.0
+        )
+        canvas.annotations = [seedItem]
+
+        let overflowCoordJSON = """
+        [
+          {
+            "id": "1621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "blur",
+            "points": [[-1e308, 0], [1e308, 100]],
+            "startPoint": [-1e308, 0],
+            "endPoint": [1e308, 100],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 0, "green": 0, "blue": 1, "alpha": 1},
+            "lineWeight": 6,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 100,
+            "text": "",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 24
+          }
+        ]
+        """.data(using: .utf8)!
+        XCTAssertFalse(canvas.importSessionData(overflowCoordJSON))
+        XCTAssertEqual(canvas.annotations, [seedItem])
+
+        let outOfRangePointsJSON = """
+        [
+          {
+            "id": "2621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "freeHand",
+            "points": [[10, 10], [40000, 20]],
+            "startPoint": [10, 10],
+            "endPoint": [20, 20],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 1, "green": 0, "blue": 0, "alpha": 1},
+            "lineWeight": 6,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 100,
+            "text": "",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 24
+          }
+        ]
+        """.data(using: .utf8)!
+        XCTAssertFalse(canvas.importSessionData(outOfRangePointsJSON))
+        XCTAssertEqual(canvas.annotations, [seedItem])
+
+        let extremeWeightsJSON = """
+        [
+          {
+            "id": "3621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "blur",
+            "points": [[20, 20], [120, 120]],
+            "startPoint": [20, 20],
+            "endPoint": [120, 120],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 0, "green": 0, "blue": 1, "alpha": 1},
+            "lineWeight": 1e20,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 100,
+            "text": "",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 1e20
+          },
+          {
+            "id": "4621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "text",
+            "points": [[30, 30]],
+            "startPoint": [30, 30],
+            "endPoint": [30, 30],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 0, "green": 0, "blue": 1, "alpha": 1},
+            "lineWeight": -5,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 100,
+            "text": "Hi",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 1
+          }
+        ]
+        """.data(using: .utf8)!
+        XCTAssertTrue(canvas.importSessionData(extremeWeightsJSON))
+        XCTAssertEqual(canvas.annotations.count, 2)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].fontSize, 200.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].fontSize, 8.0, accuracy: 1e-6)
+
+        let captureManager = ScreenCaptureManager()
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: Double.nan, y: 0, width: 40, height: 40), excludingWindowID: nil))
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: -1e308, y: 0, width: Double.infinity, height: 100), excludingWindowID: nil))
+        XCTAssertNil(captureManager.captureScreenRect(.infinite, excludingWindowID: nil))
+        XCTAssertNil(captureManager.captureScreenRect(CGRect(x: 200_000, y: 200_000, width: 100, height: 100), excludingWindowID: nil))
+
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateToolIndicator = false
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let extremeCanvas = AnnotationCanvasState()
+        let view = AnnotateCanvasView(
+            frame: NSRect(x: 0, y: 0, width: 200, height: 200),
+            canvasState: extremeCanvas,
+            settings: settings,
+            shortcutManager: shortcuts
+        )
+
+        let hugeBlurItem = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: -20_000, y: -20_000),
+            endPoint: CGPoint(x: 20_000, y: 20_000),
+            strokeColor: .blue,
+            lineWeight: 1e20,
+            blurStyle: .gaussian
+        )
+        let nonFiniteBlurItem = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: -1e308, y: 0),
+            endPoint: CGPoint(x: 1e308, y: 100),
+            strokeColor: .blue,
+            lineWeight: .nan,
+            blurStyle: .pixelate
+        )
+        extremeCanvas.annotations = [hugeBlurItem, nonFiniteBlurItem]
+        extremeCanvas.selectedIDs = [hugeBlurItem.id, nonFiniteBlurItem.id]
+
+        guard let fallbackPNG = Screenshotter.renderViewToPNGData(view),
+              let fallbackCG = NSBitmapImageRep(data: fallbackPNG)?.cgImage,
+              let fallbackCenter = rgbaPixel(in: fallbackCG, at: (x: fallbackCG.width / 2, y: fallbackCG.height / 2)) else {
+            XCTFail("Expected safe fallback render for 40000x40000 and non-finite blur items")
+            return
+        }
+        XCTAssertEqual(fallbackCenter.a, 255)
+
+        var capturedRects: [CGRect] = []
+        view.regionCaptureProvider = { rect in
+            capturedRects.append(rect)
+            return self.makeTestSourceImage(size: 128)
+        }
+        view.clearBlurCache()
+
+        guard let clippedCapturePNG = Screenshotter.renderViewToPNGData(view),
+              let clippedCaptureCG = NSBitmapImageRep(data: clippedCapturePNG)?.cgImage,
+              let clippedCenter = rgbaPixel(in: clippedCaptureCG, at: (x: clippedCaptureCG.width / 2, y: clippedCaptureCG.height / 2)) else {
+            XCTFail("Expected safe clipped capture render for 40000x40000 blur item")
+            return
+        }
+        XCTAssertEqual(capturedRects, [CGRect(x: 0, y: 0, width: 200, height: 200)])
+        XCTAssertEqual(clippedCenter.a, 255)
+    }
+
+    private func makeTestSourceImage(size: Int) -> CGImage? {
+        var bytes = [UInt8](repeating: 0, count: size * size * 4)
+        let half = max(1, size / 2)
+        for y in 0..<size {
+            for x in 0..<size {
+                let offset = (y * size + x) * 4
+                if x < half {
+                    bytes[offset] = UInt8(min(255, 190 + (x * 64) / half))
+                    bytes[offset + 1] = 0
+                    bytes[offset + 2] = 0
+                } else {
+                    bytes[offset] = 0
+                    bytes[offset + 1] = 0
+                    bytes[offset + 2] = UInt8(min(255, 190 + ((x - half) * 64) / half))
+                }
+                bytes[offset + 3] = 255
+            }
+        }
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        return bytes.withUnsafeMutableBytes { rawBuffer in
+            guard let context = CGContext(
+                data: rawBuffer.baseAddress,
+                width: size,
+                height: size,
+                bitsPerComponent: 8,
+                bytesPerRow: size * 4,
+                space: space,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return nil
+            }
+            return context.makeImage()
+        }
+    }
+
+    private func rgbaPixel(in image: CGImage, at point: (x: Int, y: Int)) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+        let withinX = point.x >= 0 && point.x < image.width
+        let withinY = point.y >= 0 && point.y < image.height
+        guard withinX && withinY else { return nil }
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+
+        var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        let drew = bytes.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let context = CGContext(
+                data: rawBuffer.baseAddress,
+                width: image.width,
+                height: image.height,
+                bitsPerComponent: 8,
+                bytesPerRow: image.width * 4,
+                space: space,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return false
+            }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return true
+        }
+        guard drew else { return nil }
+        let offset = (point.y * image.width + point.x) * 4
+        return (bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3])
     }
 }

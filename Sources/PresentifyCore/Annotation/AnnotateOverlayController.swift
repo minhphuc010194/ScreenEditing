@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CoreEngine
+import CoreImage
 import SwiftUI
 
 public final class AnnotatePanel: NSPanel {
@@ -42,6 +43,8 @@ public final class AnnotatePanel: NSPanel {
 }
 
 public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
+    private static let blurCIContext = CIContext(options: [.cacheIntermediates: false])
+
     public let canvasState: AnnotationCanvasState
     public let settings: AppSettings
     public let shortcutManager: ShortcutManager
@@ -51,6 +54,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     public var onRequestOpenSettings: (() -> Void)?
     public var onLineWeightChanged: ((Double) -> Void)?
     public var exclusionScreenRectsProvider: (() -> [NSRect])?
+    public var regionCaptureProvider: ((CGRect) -> CGImage?)?
 
     public private(set) var cursorLocation: CGPoint?
     public private(set) var activeTextField: NSTextField?
@@ -61,6 +65,8 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     private var dragOriginPoint: CGPoint = .zero
     private var lastDragPoint: CGPoint = .zero
     private var activeTouchIdentity: AnyObject?
+    private var cachedBlurImages: [UUID: (rect: CGRect, style: BlurStyle, weight: Int, image: CGImage)] = [:]
+    private var lastRenderedWhiteboardActive = false
     private var cancellables: Set<AnyCancellable> = []
 
     public init(
@@ -72,6 +78,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         self.canvasState = canvasState
         self.settings = settings
         self.shortcutManager = shortcutManager
+        self.lastRenderedWhiteboardActive = settings.isWhiteboardActive
         super.init(frame: frame)
         self.wantsLayer = true
         self.allowedTouchTypes = [.indirect]
@@ -85,6 +92,52 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.needsDisplay = true }
             .store(in: &cancellables)
+    }
+
+    public func clearBlurCache() {
+        cachedBlurImages.removeAll()
+        needsDisplay = true
+    }
+
+    public static func applyBlurFilter(to image: CGImage, item: AnnotationItem) -> CGImage? {
+        let hasPositivePixels = image.width > 0 && image.height > 0
+        let isWithinMaxPixels = image.width <= 16_384 && image.height <= 16_384
+        guard hasPositivePixels && isWithinMaxPixels else { return nil }
+
+        let ciImage = CIImage(cgImage: image)
+        let extent = ciImage.extent
+        let hasValidExtent = !extent.isEmpty && !extent.isInfinite
+        guard hasValidExtent else { return nil }
+
+        let clampedWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 2.0), 48.0) : 6.0
+        let rectWidth = Double(item.boundingRect.width)
+        let hasValidRectWidth = rectWidth.isFinite && rectWidth >= 1.0
+        let rawScale = hasValidRectWidth ? (Double(image.width) / rectWidth) : 1.0
+        let backingScale = rawScale.isFinite ? min(max(rawScale, 1.0), 4.0) : 1.0
+        let pointStrength = 8.0 + clampedWeight * 1.75
+        let pixelStrength = pointStrength * backingScale
+
+        let filtered: CIImage
+        switch item.effectiveBlurStyle {
+        case .gaussian:
+            filtered = ciImage
+                .clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: pixelStrength])
+                .cropped(to: extent)
+        case .pixelate:
+            let center = CIVector(x: extent.midX, y: extent.midY)
+            filtered = ciImage
+                .clampedToExtent()
+                .applyingFilter(
+                    "CIPixellate",
+                    parameters: [
+                        kCIInputScaleKey: pixelStrength,
+                        kCIInputCenterKey: center
+                    ]
+                )
+                .cropped(to: extent)
+        }
+        return blurCIContext.createCGImage(filtered, from: extent)
     }
 
     @available(*, unavailable)
@@ -180,7 +233,8 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isHighlighter: settings.currentDrawMode == .highlighter,
             isAutoErase: effectiveAutoErase,
             isShiftDown: isShiftDown,
-            isOptionDown: isOptionDown
+            isOptionDown: isOptionDown,
+            blurStyle: settings.blurStyle
         )
         needsDisplay = true
     }
@@ -223,7 +277,8 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 isHighlighter: settings.currentDrawMode == .highlighter,
                 isAutoErase: effectiveAutoErase,
                 isShiftDown: flags.contains(.shift),
-                isOptionDown: flags.contains(.option)
+                isOptionDown: flags.contains(.option),
+                blurStyle: settings.blurStyle
             )
         }
 
@@ -270,7 +325,8 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             gradient: settings.activeStrokeGradient,
             lineWeight: settings.lineWeight,
             isHighlighter: settings.currentDrawMode == .highlighter,
-            isAutoErase: settings.autoEraseEnabled
+            isAutoErase: settings.autoEraseEnabled,
+            blurStyle: settings.blurStyle
         )
         needsDisplay = true
     }
@@ -393,6 +449,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         case .circle: settings.selectOrToggleDrawMode(.circle)
         case .text: settings.selectOrToggleDrawMode(.text)
         case .highlighter: settings.selectOrToggleDrawMode(.highlighter)
+        case .blur: settings.selectOrToggleDrawMode(.blur)
         case .clearAnnotate: canvasState.deleteSelectedOrClearAll()
         case .decreaseLineWeight:
             settings.decreaseLineWeight()
@@ -498,6 +555,15 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         super.draw(dirtyRect)
         guard let context = NSGraphicsContext.current?.cgContext else { return }
 
+        if lastRenderedWhiteboardActive != settings.isWhiteboardActive {
+            lastRenderedWhiteboardActive = settings.isWhiteboardActive
+            cachedBlurImages.removeAll()
+        }
+        if !cachedBlurImages.isEmpty {
+            let activeBlurIDs = Set(canvasState.annotations.lazy.filter { $0.mode == .blur }.map(\.id))
+            cachedBlurImages = cachedBlurImages.filter { activeBlurIDs.contains($0.key) }
+        }
+
         if settings.isWhiteboardActive {
             context.setFillColor(
                 settings.annotateWhiteboardColor.nsColor
@@ -534,7 +600,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
     private func drawAnnotation(_ item: AnnotationItem, in context: CGContext, isSelected: Bool) {
         context.saveGState()
-        if item.isHighlighter {
+        if item.isHighlighter && item.mode != .blur {
             context.setBlendMode(.multiply)
         }
 
@@ -569,21 +635,109 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             strokePath(path, item: item, color: color, in: context)
         case .freeHand, .highlighter:
             strokePath(path, item: item, color: color, in: context)
+        case .blur:
+            let rawRect = item.boundingRect
+            let hasFiniteOrigin = rawRect.origin.x.isFinite && rawRect.origin.y.isFinite
+            let hasFiniteSize = rawRect.size.width.isFinite && rawRect.size.height.isFinite
+            let isRawRectFinite = hasFiniteOrigin && hasFiniteSize
+            let hasPositiveRawSize = rawRect.width > 0 && rawRect.height > 0
+            if isRawRectFinite && hasPositiveRawSize {
+                let visibleRect = rawRect.intersection(bounds)
+                let isVisibleNonEmpty = !visibleRect.isNull && !visibleRect.isEmpty
+                let hasFiniteVisibleOrigin = visibleRect.origin.x.isFinite && visibleRect.origin.y.isFinite
+                let hasFiniteVisibleSize = visibleRect.size.width.isFinite && visibleRect.size.height.isFinite
+                let isVisibleFinite = hasFiniteVisibleOrigin && hasFiniteVisibleSize
+                let isVisibleBounded = visibleRect.width <= 16_384.0 && visibleRect.height <= 16_384.0
+                let canRenderVisible = isVisibleNonEmpty && isVisibleFinite
+                if canRenderVisible && isVisibleBounded {
+                    let isDraft = canvasState.activeDraft?.id == item.id
+                    let integralRect = visibleRect.integral
+                    let style = item.effectiveBlurStyle
+                    let clampedWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 2.0), 48.0) : 6.0
+                    let weightBucket = Int(clampedWeight.rounded())
+                    let hasCaptureDimensions = visibleRect.width >= 2.0 && visibleRect.height >= 2.0
+                    let canCapture = !settings.isWhiteboardActive && hasCaptureDimensions
+
+                    var blurredImage: CGImage?
+                    if canCapture {
+                        if !isDraft, let cached = cachedBlurImages[item.id] {
+                            let matchesGeometry = cached.rect == integralRect && cached.weight == weightBucket
+                            if matchesGeometry && cached.style == style {
+                                blurredImage = cached.image
+                            }
+                        }
+                        if blurredImage == nil, let rawImage = regionCaptureProvider?(visibleRect) {
+                            var filterItem = item
+                            filterItem.startPoint = visibleRect.origin
+                            filterItem.endPoint = CGPoint(x: visibleRect.maxX, y: visibleRect.maxY)
+                            filterItem.isConstrained = false
+                            filterItem.lineWeight = clampedWeight
+                            if let filtered = Self.applyBlurFilter(to: rawImage, item: filterItem) {
+                                blurredImage = filtered
+                                if !isDraft {
+                                    cachedBlurImages[item.id] = (integralRect, style, weightBucket, filtered)
+                                }
+                            }
+                        }
+                    }
+
+                    context.saveGState()
+                    context.clip(to: visibleRect)
+                    context.setFillColor(NSColor(srgbRed: 0.14, green: 0.18, blue: 0.24, alpha: 1.0).cgColor)
+                    context.fill(visibleRect)
+                    if let blurredImage {
+                        context.interpolationQuality = .high
+                        context.draw(blurredImage, in: visibleRect)
+                    } else {
+                        let tileSize = max(10.0, max(visibleRect.width, visibleRect.height) / 32.0)
+                        let cols = Int(ceil(visibleRect.width / tileSize))
+                        let rows = Int(ceil(visibleRect.height / tileSize))
+                        context.setFillColor(NSColor(srgbRed: 0.20, green: 0.26, blue: 0.34, alpha: 1.0).cgColor)
+                        for row in 0..<rows {
+                            for col in 0..<cols where (row + col).isMultiple(of: 2) {
+                                let tileRect = CGRect(
+                                    x: visibleRect.minX + CGFloat(col) * tileSize,
+                                    y: visibleRect.minY + CGFloat(row) * tileSize,
+                                    width: tileSize,
+                                    height: tileSize
+                                )
+                                context.fill(tileRect)
+                            }
+                        }
+                    }
+                    context.restoreGState()
+
+                    if isDraft {
+                        context.setStrokeColor(NSColor(SettingsView.themeBlue).cgColor)
+                        context.setLineWidth(1.5)
+                        context.stroke(visibleRect)
+                    }
+                }
+            }
         }
 
         if isSelected {
-            let selectionBox = item.boundingRect.insetBy(dx: -4, dy: -4)
-            context.setStrokeColor(NSColor.systemCyan.cgColor)
-            context.setLineWidth(1.5)
-            context.setLineDash(phase: 0, lengths: [4, 3])
-            context.stroke(selectionBox)
+            let rawBox = item.boundingRect
+            let hasFiniteOrigin = rawBox.origin.x.isFinite && rawBox.origin.y.isFinite
+            let hasFiniteSize = rawBox.size.width.isFinite && rawBox.size.height.isFinite
+            if hasFiniteOrigin && hasFiniteSize {
+                let clippedBox = rawBox.intersection(bounds)
+                if !clippedBox.isNull {
+                    let selectionBox = clippedBox.insetBy(dx: -4, dy: -4)
+                    context.setStrokeColor(NSColor.systemCyan.cgColor)
+                    context.setLineWidth(1.5)
+                    context.setLineDash(phase: 0, lengths: [4, 3])
+                    context.stroke(selectionBox)
+                }
+            }
         }
 
         context.restoreGState()
     }
 
     private func strokePath(_ path: CGPath, item: AnnotationItem, color: NSColor, in context: CGContext) {
-        context.setLineWidth(CGFloat(item.lineWeight))
+        let clampedWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 1.0), 64.0) : 6.0
+        context.setLineWidth(CGFloat(clampedWeight))
         context.setLineCap(.round)
         context.setLineJoin(.round)
         context.addPath(path)
@@ -623,25 +777,38 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         switch item.mode {
         case .freeHand, .highlighter:
             guard let first = item.points.first else { return path }
+            let isFirstFinite = first.x.isFinite && first.y.isFinite
+            guard isFirstFinite else { return path }
             path.move(to: first)
-            for pt in item.points.dropFirst() {
+            for pt in item.points.dropFirst() where pt.x.isFinite && pt.y.isFinite {
                 path.addLine(to: pt)
             }
         case .arrow:
             let vertices = item.arrowPolygonPoints()
             if let first = vertices.first {
-                path.move(to: first)
-                for pt in vertices.dropFirst() {
-                    path.addLine(to: pt)
+                let isFirstFinite = first.x.isFinite && first.y.isFinite
+                if isFirstFinite {
+                    path.move(to: first)
+                    for pt in vertices.dropFirst() where pt.x.isFinite && pt.y.isFinite {
+                        path.addLine(to: pt)
+                    }
+                    path.closeSubpath()
                 }
-                path.closeSubpath()
             }
-        case .rectangle:
-            path.addRect(item.boundingRect)
+        case .rectangle, .blur, .text:
+            let box = item.boundingRect
+            let hasFiniteOrigin = box.origin.x.isFinite && box.origin.y.isFinite
+            let hasFiniteSize = box.size.width.isFinite && box.size.height.isFinite
+            if hasFiniteOrigin && hasFiniteSize {
+                path.addRect(box)
+            }
         case .circle:
-            path.addEllipse(in: item.boundingRect)
-        case .text:
-            path.addRect(item.boundingRect)
+            let box = item.boundingRect
+            let hasFiniteOrigin = box.origin.x.isFinite && box.origin.y.isFinite
+            let hasFiniteSize = box.size.width.isFinite && box.size.height.isFinite
+            if hasFiniteOrigin && hasFiniteSize {
+                path.addEllipse(in: box)
+            }
         }
         return path
     }
@@ -685,6 +852,7 @@ public final class AnnotateOverlayController {
     public private(set) var shortcutsPanel: FloatingControlPanel?
     public var onRequestOpenSettings: (() -> Void)?
 
+    private let captureManager = ScreenCaptureManager()
     private var autoEraseTimer: Timer?
     private var flagsMonitor: Any?
     private var keyDownMonitor: Any?
@@ -751,6 +919,16 @@ public final class AnnotateOverlayController {
             view.exclusionScreenRectsProvider = { [weak self] in
                 self?.visibleAuxiliaryPanelRects() ?? []
             }
+            view.regionCaptureProvider = { [weak self, weak view] viewRect in
+                guard let self, let view else { return nil }
+                guard let panel = self.panel else { return nil }
+                let isBundledApp = Bundle.main.bundleURL.pathExtension == "app"
+                guard isBundledApp && !self.settings.isWhiteboardActive else { return nil }
+                let windowRect = view.convert(viewRect, to: nil)
+                let screenRect = panel.convertToScreen(windowRect)
+                let windowID = panel.windowNumber > 0 ? CGWindowID(panel.windowNumber) : nil
+                return self.captureManager.captureScreenRect(screenRect, excludingWindowID: windowID)
+            }
             newPanel.contentView = view
             self.panel = newPanel
             self.canvasView = view
@@ -778,6 +956,7 @@ public final class AnnotateOverlayController {
 
     public func hideAnnotation() {
         canvasView?.commitActiveTextEditing()
+        canvasView?.clearBlurCache()
         if settings.annotateSaveSession, let data = canvasState.exportSessionData() {
             settings.defaults.set(data, forKey: Self.savedSessionKey)
         } else if !settings.annotateSaveSession {
@@ -807,18 +986,22 @@ public final class AnnotateOverlayController {
 
     public func updateInteractivePassThrough(modifierFlags: NSEvent.ModifierFlags) {
         guard let panel else { return }
-        guard settings.annotateInteractiveMode else {
+        let previousIgnores = panel.ignoresMouseEvents
+        if !settings.annotateInteractiveMode {
             panel.ignoresMouseEvents = false
-            return
+        } else {
+            let isHoldKeyActive: Bool
+            switch settings.interactiveModeKey {
+            case .fn:
+                isHoldKeyActive = modifierFlags.contains(.function)
+            case .capsLock:
+                isHoldKeyActive = modifierFlags.contains(.capsLock)
+            }
+            panel.ignoresMouseEvents = !isHoldKeyActive
         }
-        let isHoldKeyActive: Bool
-        switch settings.interactiveModeKey {
-        case .fn:
-            isHoldKeyActive = modifierFlags.contains(.function)
-        case .capsLock:
-            isHoldKeyActive = modifierFlags.contains(.capsLock)
+        if panel.ignoresMouseEvents != previousIgnores {
+            canvasView?.clearBlurCache()
         }
-        panel.ignoresMouseEvents = !isHoldKeyActive
     }
 
     private func visibleAuxiliaryPanelRects() -> [NSRect] {
@@ -854,6 +1037,7 @@ public final class AnnotateOverlayController {
             .sink { [weak self] _, _, _ in
                 guard let self else { return }
                 self.panel?.updateBackground(from: self.settings)
+                self.canvasView?.clearBlurCache()
                 self.canvasView?.needsDisplay = true
             }
             .store(in: &cancellables)

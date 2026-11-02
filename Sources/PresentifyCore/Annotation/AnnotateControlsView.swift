@@ -582,7 +582,7 @@ public struct AnnotateShortcutsView: View {
 
     public static let modifierTips: [(symbol: String, description: String)] = [
         ("⇧ Shift", "Hold while drawing to constrain straight lines (45°), squares, or circles."),
-        ("⌥ Option", "Hold while drawing a rectangle or circle to fill the shape."),
+        ("⌥ Option", "Hold while drawing a rectangle/circle to fill, or blur to switch Gaussian/Pixelate."),
         ("⌃ Control", "Hold while drawing to invert Auto Erase for the current stroke."),
         ("⌘ Command", "Hold to click or marquee-select annotations, drag to move, or Delete to remove."),
         ("Esc", "Exit active text field or close the annotation overlay.")

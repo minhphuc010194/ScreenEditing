@@ -253,6 +253,12 @@ public struct SettingsView: View {
                     Slider(value: $settings.lineWeight, in: settings.minLineWeight...settings.maxLineWeight, step: 1)
                 }
 
+                Picker("Blur Style", selection: $settings.blurStyle) {
+                    ForEach(BlurStyle.allCases) { style in
+                        Text(style.title).tag(style)
+                    }
+                }
+
                 ColorPicker(
                     "Whiteboard Color",
                     selection: Binding(
