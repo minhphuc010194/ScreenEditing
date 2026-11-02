@@ -42,6 +42,58 @@ public final class AnnotatePanel: NSPanel {
     }
 }
 
+public enum BackdropBlurBorderStyle {
+    case committed
+    case draft
+}
+
+public final class BackdropBlurRegionView: NSVisualEffectView {
+    public private(set) var borderStyle: BackdropBlurBorderStyle = .committed
+
+    override public init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        blendingMode = .behindWindow
+        material = .selection
+        isEmphasized = false
+        state = .active
+        wantsLayer = true
+        configureLayerAppearance()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override public func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override public func updateLayer() {
+        super.updateLayer()
+        configureLayerAppearance()
+    }
+
+    public func applyBorderStyle(_ style: BackdropBlurBorderStyle) {
+        borderStyle = style
+        configureLayerAppearance()
+    }
+
+    private func configureLayerAppearance() {
+        wantsLayer = true
+        layer?.cornerRadius = 4.0
+        layer?.masksToBounds = true
+        switch borderStyle {
+        case .committed:
+            layer?.borderWidth = 1.0
+            layer?.borderColor = NSColor(SettingsView.themeLightBlue).withAlphaComponent(0.28).cgColor
+        case .draft:
+            layer?.borderWidth = 1.5
+            layer?.borderColor = NSColor(SettingsView.themeBlue).cgColor
+        }
+    }
+}
+
 public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     private static let blurCIContext = CIContext(options: [.cacheIntermediates: false])
 
@@ -54,19 +106,23 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     public var onRequestOpenSettings: (() -> Void)?
     public var onLineWeightChanged: ((Double) -> Void)?
     public var exclusionScreenRectsProvider: (() -> [NSRect])?
-    public var regionCaptureProvider: ((CGRect) -> CGImage?)?
+    public var regionCaptureProvider: ((CGRect) -> CGImage?)? {
+        didSet { clearBlurCache() }
+    }
 
     public private(set) var cursorLocation: CGPoint?
     public private(set) var activeTextField: NSTextField?
     public private(set) var editingAnnotationID: UUID?
+    public private(set) var backdropBlurViews: [UUID: BackdropBlurRegionView] = [:]
 
     private var isDraggingSelection = false
     private var isMarqueeSelecting = false
     private var dragOriginPoint: CGPoint = .zero
     private var lastDragPoint: CGPoint = .zero
     private var activeTouchIdentity: AnyObject?
-    private var cachedBlurImages: [UUID: (rect: CGRect, style: BlurStyle, weight: Int, image: CGImage)] = [:]
+    private var cachedBlurImages: [UUID: (rect: CGRect, style: BlurStyle, weight: Int, isDraft: Bool, image: CGImage)] = [:]
     private var lastRenderedWhiteboardActive = false
+    private var isCachingOffscreenDisplay = false
     private var cancellables: Set<AnyCancellable> = []
 
     public init(
@@ -85,18 +141,139 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
         canvasState.objectWillChange
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.needsDisplay = true }
+            .sink { [weak self] _ in
+                self?.syncBackdropBlurViews()
+                self?.needsDisplay = true
+            }
             .store(in: &cancellables)
 
         settings.objectWillChange
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.needsDisplay = true }
+            .sink { [weak self] _ in
+                self?.syncBackdropBlurViews()
+                self?.needsDisplay = true
+            }
             .store(in: &cancellables)
     }
 
     public func clearBlurCache() {
         cachedBlurImages.removeAll()
+        if !backdropBlurViews.isEmpty || regionCaptureProvider == nil {
+            syncBackdropBlurViews()
+        }
         needsDisplay = true
+    }
+
+    public func removeAllBackdropBlurViews() {
+        for backdropView in backdropBlurViews.values {
+            backdropView.removeFromSuperview()
+        }
+        backdropBlurViews.removeAll()
+    }
+
+    public func syncBackdropBlurViews() {
+        syncBlurCacheState()
+        let isHiddenOverlayPanel = window is AnnotatePanel && !settings.isAnnotating
+        if settings.isWhiteboardActive || isHiddenOverlayPanel {
+            removeAllBackdropBlurViews()
+            return
+        }
+
+        var candidateItems = canvasState.annotations.filter { $0.mode == .blur }
+        if let draft = canvasState.activeDraft, draft.mode == .blur {
+            candidateItems.append(draft)
+        }
+
+        var activeBackdropIDs: Set<UUID> = []
+        for item in candidateItems {
+            guard let visibleRect = validatedVisibleBlurRect(for: item) else { continue }
+            let hasCaptureDimensions = visibleRect.width >= 2.0 && visibleRect.height >= 2.0
+            guard hasCaptureDimensions else { continue }
+            guard resolveCapturedBlurImage(for: item, visibleRect: visibleRect) == nil else { continue }
+
+            let isDraft = canvasState.activeDraft?.id == item.id
+            let backdropView = backdropBlurViews[item.id] ?? BackdropBlurRegionView(frame: visibleRect)
+            backdropView.frame = visibleRect
+            backdropView.applyBorderStyle(isDraft ? .draft : .committed)
+            if backdropView.superview !== self {
+                if let textField = activeTextField, textField.superview === self {
+                    addSubview(backdropView, positioned: .below, relativeTo: textField)
+                } else {
+                    addSubview(backdropView)
+                }
+            }
+            backdropBlurViews[item.id] = backdropView
+            activeBackdropIDs.insert(item.id)
+        }
+
+        let staleIDs = backdropBlurViews.keys.filter { !activeBackdropIDs.contains($0) }
+        for staleID in staleIDs {
+            backdropBlurViews[staleID]?.removeFromSuperview()
+            backdropBlurViews.removeValue(forKey: staleID)
+        }
+    }
+
+    private func syncBlurCacheState() {
+        if lastRenderedWhiteboardActive != settings.isWhiteboardActive {
+            lastRenderedWhiteboardActive = settings.isWhiteboardActive
+            cachedBlurImages.removeAll()
+        }
+        if !cachedBlurImages.isEmpty {
+            var activeBlurIDs = Set(canvasState.annotations.lazy.filter { $0.mode == .blur }.map(\.id))
+            if let draft = canvasState.activeDraft, draft.mode == .blur {
+                activeBlurIDs.insert(draft.id)
+            }
+            cachedBlurImages = cachedBlurImages.filter { activeBlurIDs.contains($0.key) }
+        }
+    }
+
+    private func validatedVisibleBlurRect(for item: AnnotationItem) -> CGRect? {
+        let rawRect = item.boundingRect
+        let hasFiniteOrigin = rawRect.origin.x.isFinite && rawRect.origin.y.isFinite
+        let hasFiniteSize = rawRect.size.width.isFinite && rawRect.size.height.isFinite
+        let isRawRectFinite = hasFiniteOrigin && hasFiniteSize
+        let hasPositiveRawSize = rawRect.width > 0 && rawRect.height > 0
+        guard isRawRectFinite && hasPositiveRawSize else { return nil }
+
+        let visibleRect = rawRect.intersection(bounds)
+        let isVisibleNonEmpty = !visibleRect.isNull && !visibleRect.isEmpty
+        let hasFiniteVisibleOrigin = visibleRect.origin.x.isFinite && visibleRect.origin.y.isFinite
+        let hasFiniteVisibleSize = visibleRect.size.width.isFinite && visibleRect.size.height.isFinite
+        let isVisibleFinite = hasFiniteVisibleOrigin && hasFiniteVisibleSize
+        let isVisibleBounded = visibleRect.width <= 16_384.0 && visibleRect.height <= 16_384.0
+        let canRenderVisible = isVisibleNonEmpty && isVisibleFinite
+        guard canRenderVisible && isVisibleBounded else { return nil }
+        return visibleRect
+    }
+
+    private func resolveCapturedBlurImage(for item: AnnotationItem, visibleRect: CGRect) -> CGImage? {
+        let hasCaptureDimensions = visibleRect.width >= 2.0 && visibleRect.height >= 2.0
+        let canCapture = !settings.isWhiteboardActive && hasCaptureDimensions
+        guard canCapture else { return nil }
+
+        let isDraft = canvasState.activeDraft?.id == item.id
+        let integralRect = visibleRect.integral
+        let style = item.effectiveBlurStyle
+        let clampedWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 2.0), 48.0) : 6.0
+        let weightBucket = Int(clampedWeight.rounded())
+
+        if let cached = cachedBlurImages[item.id] {
+            let matchesGeometry = cached.rect == integralRect && cached.weight == weightBucket
+            let matchesAppearance = cached.style == style && cached.isDraft == isDraft
+            if matchesGeometry && matchesAppearance {
+                return cached.image
+            }
+        }
+
+        guard let rawImage = regionCaptureProvider?(visibleRect) else { return nil }
+        var filterItem = item
+        filterItem.startPoint = visibleRect.origin
+        filterItem.endPoint = CGPoint(x: visibleRect.maxX, y: visibleRect.maxY)
+        filterItem.isConstrained = false
+        filterItem.lineWeight = clampedWeight
+        guard let filtered = Self.applyBlurFilter(to: rawImage, item: filterItem) else { return nil }
+        cachedBlurImages[item.id] = (integralRect, style, weightBucket, isDraft, filtered)
+        return filtered
     }
 
     public static func applyBlurFilter(to image: CGImage, item: AnnotationItem) -> CGImage? {
@@ -149,6 +326,27 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
     override public func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
+    }
+
+    override public func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        syncBackdropBlurViews()
+    }
+
+    override public func cacheDisplay(in rect: NSRect, to bitmapImageRep: NSBitmapImageRep) {
+        let previousCaching = isCachingOffscreenDisplay
+        isCachingOffscreenDisplay = true
+        let visibleBackdrops = backdropBlurViews.values.filter { !$0.isHidden }
+        for backdropView in visibleBackdrops {
+            backdropView.isHidden = true
+        }
+        defer {
+            isCachingOffscreenDisplay = previousCaching
+            for backdropView in visibleBackdrops {
+                backdropView.isHidden = false
+            }
+        }
+        super.cacheDisplay(in: rect, to: bitmapImageRep)
     }
 
     override public func hitTest(_ point: NSPoint) -> NSView? {
@@ -214,6 +412,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 isMarqueeSelecting = true
                 canvasState.selectionRectangle = CGRect(origin: point, size: .zero)
             }
+            syncBackdropBlurViews()
             needsDisplay = true
             return
         }
@@ -236,6 +435,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isOptionDown: isOptionDown,
             blurStyle: settings.blurStyle
         )
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -248,6 +448,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             let delta = CGSize(width: point.x - lastDragPoint.x, height: point.y - lastDragPoint.y)
             lastDragPoint = point
             canvasState.moveSelectedAnnotations(by: delta)
+            syncBackdropBlurViews()
             needsDisplay = true
             return
         }
@@ -287,6 +488,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isShiftDown: flags.contains(.shift),
             isOptionDown: flags.contains(.option)
         )
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -298,6 +500,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isDraggingSelection = false
             isMarqueeSelecting = false
             canvasState.selectionRectangle = nil
+            syncBackdropBlurViews()
             needsDisplay = true
             return
         }
@@ -308,6 +511,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isOptionDown: event.modifierFlags.contains(.option)
         )
         canvasState.finishStroke()
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -328,6 +532,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isAutoErase: settings.autoEraseEnabled,
             blurStyle: settings.blurStyle
         )
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -338,6 +543,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let point = touchPoint(for: touch)
         cursorLocation = point
         canvasState.updateStroke(to: point)
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -347,6 +553,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         guard touches.contains(where: { $0.identity.isEqual(activeID) }) else { return }
         activeTouchIdentity = nil
         canvasState.finishStroke()
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -366,11 +573,13 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
     @objc public func undo(_ sender: Any?) {
         canvasState.undo()
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
     @objc public func redo(_ sender: Any?) {
         canvasState.redo()
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -401,12 +610,14 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
         if normMods == KeyBinding.commandMask && keyCode == 0x06 {
             canvasState.undo()
+            syncBackdropBlurViews()
             needsDisplay = true
             return true
         }
         if (normMods == (KeyBinding.commandMask | KeyBinding.shiftMask) && keyCode == 0x06)
             || (normMods == KeyBinding.commandMask && keyCode == 0x10) {
             canvasState.redo()
+            syncBackdropBlurViews()
             needsDisplay = true
             return true
         }
@@ -421,6 +632,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         }
         if normMods == 0 && keyCode == 0x75 {
             canvasState.deleteSelectedOrClearAll()
+            syncBackdropBlurViews()
             needsDisplay = true
             return true
         }
@@ -482,6 +694,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             return false
         }
 
+        syncBackdropBlurViews()
         needsDisplay = true
         return true
     }
@@ -555,14 +768,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         super.draw(dirtyRect)
         guard let context = NSGraphicsContext.current?.cgContext else { return }
 
-        if lastRenderedWhiteboardActive != settings.isWhiteboardActive {
-            lastRenderedWhiteboardActive = settings.isWhiteboardActive
-            cachedBlurImages.removeAll()
-        }
-        if !cachedBlurImages.isEmpty {
-            let activeBlurIDs = Set(canvasState.annotations.lazy.filter { $0.mode == .blur }.map(\.id))
-            cachedBlurImages = cachedBlurImages.filter { activeBlurIDs.contains($0.key) }
-        }
+        syncBlurCacheState()
 
         if settings.isWhiteboardActive {
             context.setFillColor(
@@ -636,51 +842,22 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         case .freeHand, .highlighter:
             strokePath(path, item: item, color: color, in: context)
         case .blur:
-            let rawRect = item.boundingRect
-            let hasFiniteOrigin = rawRect.origin.x.isFinite && rawRect.origin.y.isFinite
-            let hasFiniteSize = rawRect.size.width.isFinite && rawRect.size.height.isFinite
-            let isRawRectFinite = hasFiniteOrigin && hasFiniteSize
-            let hasPositiveRawSize = rawRect.width > 0 && rawRect.height > 0
-            if isRawRectFinite && hasPositiveRawSize {
-                let visibleRect = rawRect.intersection(bounds)
-                let isVisibleNonEmpty = !visibleRect.isNull && !visibleRect.isEmpty
-                let hasFiniteVisibleOrigin = visibleRect.origin.x.isFinite && visibleRect.origin.y.isFinite
-                let hasFiniteVisibleSize = visibleRect.size.width.isFinite && visibleRect.size.height.isFinite
-                let isVisibleFinite = hasFiniteVisibleOrigin && hasFiniteVisibleSize
-                let isVisibleBounded = visibleRect.width <= 16_384.0 && visibleRect.height <= 16_384.0
-                let canRenderVisible = isVisibleNonEmpty && isVisibleFinite
-                if canRenderVisible && isVisibleBounded {
-                    let isDraft = canvasState.activeDraft?.id == item.id
-                    let integralRect = visibleRect.integral
-                    let style = item.effectiveBlurStyle
-                    let clampedWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 2.0), 48.0) : 6.0
-                    let weightBucket = Int(clampedWeight.rounded())
-                    let hasCaptureDimensions = visibleRect.width >= 2.0 && visibleRect.height >= 2.0
-                    let canCapture = !settings.isWhiteboardActive && hasCaptureDimensions
+            if let visibleRect = validatedVisibleBlurRect(for: item) {
+                let isDraft = canvasState.activeDraft?.id == item.id
+                let hasCaptureDimensions = visibleRect.width >= 2.0 && visibleRect.height >= 2.0
+                let blurredImage = resolveCapturedBlurImage(for: item, visibleRect: visibleRect)
+                let isScreenDestination = NSGraphicsContext.current?.isDrawingToScreen ?? false
+                let isLiveScreenRender = isScreenDestination && !isCachingOffscreenDisplay
+                let hasMountedBackdrop = backdropBlurViews[item.id]?.superview === self
+                let hasWindowedBackdrop = hasMountedBackdrop && window != nil
+                let canUseLiveBackdrop = !settings.isWhiteboardActive && hasCaptureDimensions
+                let usesLiveBackdrop = blurredImage == nil && canUseLiveBackdrop
+                let hasActiveLiveBackdrop = usesLiveBackdrop && hasWindowedBackdrop
+                let shouldLeaveClearForBackdrop = hasActiveLiveBackdrop && isLiveScreenRender
 
-                    var blurredImage: CGImage?
-                    if canCapture {
-                        if !isDraft, let cached = cachedBlurImages[item.id] {
-                            let matchesGeometry = cached.rect == integralRect && cached.weight == weightBucket
-                            if matchesGeometry && cached.style == style {
-                                blurredImage = cached.image
-                            }
-                        }
-                        if blurredImage == nil, let rawImage = regionCaptureProvider?(visibleRect) {
-                            var filterItem = item
-                            filterItem.startPoint = visibleRect.origin
-                            filterItem.endPoint = CGPoint(x: visibleRect.maxX, y: visibleRect.maxY)
-                            filterItem.isConstrained = false
-                            filterItem.lineWeight = clampedWeight
-                            if let filtered = Self.applyBlurFilter(to: rawImage, item: filterItem) {
-                                blurredImage = filtered
-                                if !isDraft {
-                                    cachedBlurImages[item.id] = (integralRect, style, weightBucket, filtered)
-                                }
-                            }
-                        }
-                    }
-
+                if shouldLeaveClearForBackdrop {
+                    context.clear(visibleRect)
+                } else {
                     context.saveGState()
                     context.clip(to: visibleRect)
                     context.setFillColor(NSColor(srgbRed: 0.14, green: 0.18, blue: 0.24, alpha: 1.0).cgColor)
@@ -869,6 +1046,11 @@ public final class AnnotateOverlayController {
         self.canvasState = canvasState
         self.toastController = ToastWindowController(settings: settings)
 
+        captureManager.onFirstFrameCaptured = { [weak self] in
+            guard let self, self.settings.isAnnotating else { return }
+            self.canvasView?.clearBlurCache()
+        }
+
         if settings.annotateSaveSession,
            let savedData = settings.defaults.data(forKey: Self.savedSessionKey) {
             canvasState.importSessionData(savedData)
@@ -879,6 +1061,7 @@ public final class AnnotateOverlayController {
 
     deinit {
         stopTimersAndMonitors()
+        captureManager.stopStream()
     }
 
     public func toggleAnnotation() {
@@ -943,6 +1126,8 @@ public final class AnnotateOverlayController {
         panel?.makeFirstResponder(canvasView)
 
         settings.isAnnotating = true
+        updateBlurCaptureStream()
+        canvasView?.syncBackdropBlurViews()
         updateAuxiliaryPanels()
         startTimersAndMonitors()
 
@@ -956,7 +1141,6 @@ public final class AnnotateOverlayController {
 
     public func hideAnnotation() {
         canvasView?.commitActiveTextEditing()
-        canvasView?.clearBlurCache()
         if settings.annotateSaveSession, let data = canvasState.exportSessionData() {
             settings.defaults.set(data, forKey: Self.savedSessionKey)
         } else if !settings.annotateSaveSession {
@@ -964,12 +1148,15 @@ public final class AnnotateOverlayController {
         }
 
         stopTimersAndMonitors()
+        captureManager.stopStream()
         CustomColorPanelBridge.shared.close()
         controlsPanel?.orderOut(nil)
         shortcutsPanel?.orderOut(nil)
         panel?.orderOut(nil)
         toastController.dismiss()
         settings.isAnnotating = false
+        canvasView?.clearBlurCache()
+        canvasView?.removeAllBackdropBlurViews()
     }
 
     @discardableResult
@@ -1004,6 +1191,18 @@ public final class AnnotateOverlayController {
         }
     }
 
+    private func updateBlurCaptureStream() {
+        let canCaptureOverlay = settings.isAnnotating && !settings.isWhiteboardActive
+        let hasBlurAnnotation = canvasState.annotations.contains { $0.mode == .blur }
+        let needsBlurStream = settings.currentDrawMode == .blur || hasBlurAnnotation
+        guard canCaptureOverlay && needsBlurStream else {
+            captureManager.stopStream()
+            return
+        }
+        let windowID = panel.flatMap { $0.windowNumber > 0 ? CGWindowID($0.windowNumber) : nil }
+        captureManager.startStream(excludingWindowID: windowID)
+    }
+
     private func visibleAuxiliaryPanelRects() -> [NSRect] {
         var rects: [NSRect] = []
         if settings.showAnnotateControls, let controlsPanel, controlsPanel.isVisible {
@@ -1025,6 +1224,7 @@ public final class AnnotateOverlayController {
             .sink { [weak self] _ in
                 guard let self, self.settings.isAnnotating else { return }
                 self.canvasView?.commitActiveTextEditing()
+                self.updateBlurCaptureStream()
                 self.panel?.makeKey()
                 self.panel?.makeFirstResponder(self.canvasView)
                 self.canvasView?.needsDisplay = true
@@ -1037,8 +1237,21 @@ public final class AnnotateOverlayController {
             .sink { [weak self] _, _, _ in
                 guard let self else { return }
                 self.panel?.updateBackground(from: self.settings)
+                if self.settings.isAnnotating {
+                    self.updateBlurCaptureStream()
+                }
                 self.canvasView?.clearBlurCache()
+                self.canvasView?.syncBackdropBlurViews()
                 self.canvasView?.needsDisplay = true
+            }
+            .store(in: &cancellables)
+
+        canvasState.$annotations
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.settings.isAnnotating else { return }
+                self.updateBlurCaptureStream()
             }
             .store(in: &cancellables)
 
