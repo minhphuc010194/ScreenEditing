@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import SwiftUI
 
 public enum SafeExternalLinks {
@@ -256,6 +257,38 @@ public struct SettingsView: View {
                 Picker("Blur Style", selection: $settings.blurStyle) {
                     ForEach(BlurStyle.allCases) { style in
                         Text(style.title).tag(style)
+                    }
+                }
+
+                HStack {
+                    Text("Blur Opacity: \(Int((settings.blurOpacity * 100.0).rounded()))%")
+                    Slider(value: $settings.blurOpacity, in: 0.10...1.00, step: 0.05)
+                }
+
+                Toggle("Custom Blur Tint Color", isOn: $settings.blurUseCustomColor)
+
+                if settings.blurUseCustomColor {
+                    ColorPicker(
+                        "Blur Tint Color",
+                        selection: Binding(
+                            get: { settings.blurCustomColor.swiftUIColor },
+                            set: { settings.blurCustomColor = RGBColor(nsColor: NSColor($0)) }
+                        )
+                    )
+                }
+
+                if !CGPreflightScreenCaptureAccess() {
+                    HStack {
+                        Text("Screen Recording (for HD & Pixelate Blur)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Open Screen Recording Settings") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .controlSize(.small)
                     }
                 }
 

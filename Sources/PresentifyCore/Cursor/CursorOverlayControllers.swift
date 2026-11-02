@@ -470,9 +470,39 @@ public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDeleg
         return CGPreflightScreenCaptureAccess()
     }
 
-    public func startStream(excludingWindowID: CGWindowID?) {
-        let isBundledApp = Bundle.main.bundleURL.pathExtension == "app"
-        guard isBundledApp && requestCaptureAccessIfNeeded() else { return }
+    public struct WindowExclusionCandidate: Equatable, Sendable {
+        public var windowID: CGWindowID
+        public var owningPID: pid_t?
+        public var windowLayer: Int
+    }
+
+    public struct WindowExclusionContext: Equatable, Sendable {
+        public var currentPID: pid_t
+        public var excludingWindowID: CGWindowID?
+        public var normalWindowLayer: Int = Int(CGWindowLevelForKey(.normalWindow))
+    }
+
+    public static func shouldExcludeWindow(
+        _ candidate: WindowExclusionCandidate,
+        context: WindowExclusionContext
+    ) -> Bool {
+        let isExplicitlyExcluded = context.excludingWindowID != nil && candidate.windowID == context.excludingWindowID
+        let isOwnFloatingWindow = candidate.owningPID == context.currentPID && candidate.windowLayer > context.normalWindowLayer
+        return isExplicitlyExcluded || isOwnFloatingWindow
+    }
+
+    public static func resolveTargetDisplayID(
+        availableDisplayIDs: [CGDirectDisplayID],
+        preferredDisplayID: CGDirectDisplayID?
+    ) -> CGDirectDisplayID? {
+        if let preferredDisplayID, availableDisplayIDs.contains(preferredDisplayID) {
+            return preferredDisplayID
+        }
+        return availableDisplayIDs.first
+    }
+
+    public func startStream(excludingWindowID: CGWindowID?, preferredDisplayID: CGDirectDisplayID? = nil) {
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return }
 
         let generation: UInt64? = {
             frameLock.lock()
@@ -486,7 +516,8 @@ public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDeleg
 
         let readScreenSnapshots = { () -> (
             screens: [(displayID: CGDirectDisplayID, frame: CGRect, scale: CGFloat)],
-            main: (frame: CGRect, scale: CGFloat)?
+            main: (frame: CGRect, scale: CGFloat)?,
+            mainDisplayID: CGDirectDisplayID?
         ) in
             let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
             let screens: [(displayID: CGDirectDisplayID, frame: CGRect, scale: CGFloat)] = NSScreen.screens.compactMap { screen in
@@ -496,15 +527,34 @@ public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDeleg
                 return (displayID: displayID, frame: screen.frame, scale: screen.backingScaleFactor)
             }
             let main = NSScreen.main.map { (frame: $0.frame, scale: $0.backingScaleFactor) }
-            return (screens: screens, main: main)
+            let mainDisplayID = NSScreen.main?.deviceDescription[screenNumberKey] as? CGDirectDisplayID
+            return (screens: screens, main: main, mainDisplayID: mainDisplayID)
         }
         let screenSnapshot = Thread.isMainThread
             ? readScreenSnapshots()
             : DispatchQueue.main.sync(execute: readScreenSnapshots)
 
-        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, _ in
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, error in
             guard let self else { return }
-            guard let content, let display = content.displays.first else {
+            if let error {
+                NSLog("[ScreenCaptureManager] Failed to get shareable content: %@", String(describing: error))
+            }
+            if error != nil || content == nil {
+                self.frameLock.lock()
+                if self.streamGeneration == generation {
+                    self.activeStreamState = false
+                }
+                self.frameLock.unlock()
+                return
+            }
+            guard let content else { return }
+
+            let targetDisplayID = Self.resolveTargetDisplayID(
+                availableDisplayIDs: content.displays.map(\.displayID),
+                preferredDisplayID: preferredDisplayID ?? screenSnapshot.mainDisplayID
+            )
+            let matchedDisplay = content.displays.first { $0.displayID == targetDisplayID } ?? content.displays.first
+            guard let display = matchedDisplay else {
                 self.frameLock.lock()
                 if self.streamGeneration == generation {
                     self.activeStreamState = false
@@ -521,11 +571,17 @@ public final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDeleg
             let scale = rawScale.isFinite ? min(max(rawScale, 1.0), 4.0) : 2.0
             let displayFrame = matchedMetrics?.frame ?? CGRect(x: 0, y: 0, width: display.width, height: display.height)
 
-            let currentPID = ProcessInfo.processInfo.processIdentifier
+            let exclusionContext = WindowExclusionContext(
+                currentPID: ProcessInfo.processInfo.processIdentifier,
+                excludingWindowID: excludingWindowID
+            )
             let excludedWindows = content.windows.filter { window in
-                let isOwnProcess = window.owningApplication?.processID == currentPID
-                let isExcludedWindow = excludingWindowID != nil && window.windowID == excludingWindowID
-                return isOwnProcess || isExcludedWindow
+                let candidate = WindowExclusionCandidate(
+                    windowID: window.windowID,
+                    owningPID: window.owningApplication?.processID,
+                    windowLayer: window.windowLayer
+                )
+                return Self.shouldExcludeWindow(candidate, context: exclusionContext)
             }
 
             let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)

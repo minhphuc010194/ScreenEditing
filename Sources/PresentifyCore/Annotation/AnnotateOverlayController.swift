@@ -42,22 +42,128 @@ public final class AnnotatePanel: NSPanel {
     }
 }
 
-public enum BackdropBlurBorderStyle {
+public enum BackdropBlurBorderStyle: Equatable, Sendable {
     case committed
     case draft
 }
 
-public final class BackdropBlurRegionView: NSVisualEffectView {
-    public private(set) var borderStyle: BackdropBlurBorderStyle = .committed
+public enum BackdropGlassTier: String, CaseIterable, Equatable, Sendable {
+    case ultraThin
+    case thin
+    case regular
+    case thick
+    case ultraThick
 
-    override public init(frame frameRect: NSRect) {
+    public static func from(opacity: Double) -> BackdropGlassTier {
+        let clamped = opacity.isFinite ? min(max(opacity, 0.10), 1.00) : 0.55
+        if clamped < 0.28 {
+            return .ultraThin
+        }
+        if clamped < 0.48 {
+            return .thin
+        }
+        if clamped < 0.68 {
+            return .regular
+        }
+        if clamped < 0.86 {
+            return .thick
+        }
+        return .ultraThick
+    }
+}
+
+public struct BackdropBlurAppearance: Equatable, Sendable {
+    public static let standard = BackdropBlurAppearance()
+
+    public var borderStyle: BackdropBlurBorderStyle = .committed
+    public var opacityLevel: Double = 0.55
+    public var tintColor: RGBColor? = nil
+}
+
+private struct BackdropBlurSurfaceView: View {
+    let appearance: BackdropBlurAppearance
+
+    private var clampedOpacity: Double {
+        appearance.opacityLevel.isFinite ? min(max(appearance.opacityLevel, 0.10), 1.00) : 0.55
+    }
+
+    private var glassMaterial: Material {
+        switch BackdropGlassTier.from(opacity: clampedOpacity) {
+        case .ultraThin: return .ultraThinMaterial
+        case .thin: return .thinMaterial
+        case .regular: return .regularMaterial
+        case .thick: return .thickMaterial
+        case .ultraThick: return .ultraThickMaterial
+        }
+    }
+
+    private var veilColor: Color {
+        if let tint = appearance.tintColor {
+            return tint.swiftUIColor.opacity(0.12 + clampedOpacity * 0.78)
+        }
+        return Color.white.opacity(max(0.0, (clampedOpacity - 0.65) * 0.85))
+    }
+
+    private var borderColor: Color {
+        switch appearance.borderStyle {
+        case .committed:
+            return (appearance.tintColor?.swiftUIColor ?? SettingsView.themeLightBlue).opacity(0.38)
+        case .draft:
+            return SettingsView.themeBlue
+        }
+    }
+
+    private var borderWidth: CGFloat {
+        appearance.borderStyle == .draft ? 1.5 : 1.0
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        shape
+            .fill(Color.clear)
+            .background(glassMaterial, in: shape)
+            .overlay {
+                shape.fill(veilColor)
+            }
+            .overlay {
+                shape.strokeBorder(borderColor, lineWidth: borderWidth)
+            }
+    }
+}
+
+public final class BackdropBlurRegionView: NSView {
+    public private(set) var blurAppearance: BackdropBlurAppearance
+    private let hostingView: NSHostingView<BackdropBlurSurfaceView>
+
+    public var borderStyle: BackdropBlurBorderStyle {
+        blurAppearance.borderStyle
+    }
+
+    public var borderWidth: CGFloat {
+        blurAppearance.borderStyle == .draft ? 1.5 : 1.0
+    }
+
+    public var glassTier: BackdropGlassTier {
+        BackdropGlassTier.from(opacity: blurAppearance.opacityLevel)
+    }
+
+    public var opacityLevel: Double {
+        blurAppearance.opacityLevel
+    }
+
+    public var tintColor: RGBColor? {
+        blurAppearance.tintColor
+    }
+
+    public init(frame frameRect: NSRect, appearance: BackdropBlurAppearance = .standard) {
+        let sanitized = Self.sanitize(appearance)
+        self.blurAppearance = sanitized
+        self.hostingView = NSHostingView(rootView: BackdropBlurSurfaceView(appearance: sanitized))
         super.init(frame: frameRect)
-        blendingMode = .behindWindow
-        material = .selection
-        isEmphasized = false
-        state = .active
-        wantsLayer = true
-        configureLayerAppearance()
+        hostingView.frame = bounds
+        hostingView.autoresizingMask = [.width, .height]
+        hostingView.sizingOptions = []
+        addSubview(hostingView)
     }
 
     @available(*, unavailable)
@@ -69,28 +175,36 @@ public final class BackdropBlurRegionView: NSVisualEffectView {
         nil
     }
 
-    override public func updateLayer() {
-        super.updateLayer()
-        configureLayerAppearance()
+    override public func layout() {
+        super.layout()
+        hostingView.frame = bounds
+    }
+
+    override public func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        hostingView.frame = bounds
+    }
+
+    public func applyAppearance(_ newAppearance: BackdropBlurAppearance) {
+        let sanitized = Self.sanitize(newAppearance)
+        guard sanitized != blurAppearance else { return }
+        blurAppearance = sanitized
+        hostingView.rootView = BackdropBlurSurfaceView(appearance: sanitized)
     }
 
     public func applyBorderStyle(_ style: BackdropBlurBorderStyle) {
-        borderStyle = style
-        configureLayerAppearance()
+        var updated = blurAppearance
+        updated.borderStyle = style
+        applyAppearance(updated)
     }
 
-    private func configureLayerAppearance() {
-        wantsLayer = true
-        layer?.cornerRadius = 4.0
-        layer?.masksToBounds = true
-        switch borderStyle {
-        case .committed:
-            layer?.borderWidth = 1.0
-            layer?.borderColor = NSColor(SettingsView.themeLightBlue).withAlphaComponent(0.28).cgColor
-        case .draft:
-            layer?.borderWidth = 1.5
-            layer?.borderColor = NSColor(SettingsView.themeBlue).cgColor
-        }
+    private static func sanitize(_ raw: BackdropBlurAppearance) -> BackdropBlurAppearance {
+        let clamped = raw.opacityLevel.isFinite ? min(max(raw.opacityLevel, 0.10), 1.00) : 0.55
+        return BackdropBlurAppearance(
+            borderStyle: raw.borderStyle,
+            opacityLevel: clamped,
+            tintColor: raw.tintColor
+        )
     }
 }
 
@@ -105,9 +219,16 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     public var onRequestClose: (() -> Void)?
     public var onRequestOpenSettings: (() -> Void)?
     public var onLineWeightChanged: ((Double) -> Void)?
+    public var onBlurOpacityChanged: ((Double) -> Void)?
     public var exclusionScreenRectsProvider: (() -> [NSRect])?
     public var regionCaptureProvider: ((CGRect) -> CGImage?)? {
-        didSet { clearBlurCache() }
+        didSet {
+            cachedBlurImages.removeAll()
+            if !backdropBlurViews.isEmpty || regionCaptureProvider == nil {
+                syncBackdropBlurViews()
+            }
+            needsDisplay = true
+        }
     }
 
     public private(set) var cursorLocation: CGPoint?
@@ -120,7 +241,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     private var dragOriginPoint: CGPoint = .zero
     private var lastDragPoint: CGPoint = .zero
     private var activeTouchIdentity: AnyObject?
-    private var cachedBlurImages: [UUID: (rect: CGRect, style: BlurStyle, weight: Int, isDraft: Bool, image: CGImage)] = [:]
+    private var cachedBlurImages: [UUID: (rect: CGRect, style: BlurStyle, weight: Int, opacityBucket: Int, isDraft: Bool, image: CGImage)] = [:]
     private var lastRenderedWhiteboardActive = false
     private var isCachingOffscreenDisplay = false
     private var cancellables: Set<AnyCancellable> = []
@@ -158,9 +279,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
     public func clearBlurCache() {
         cachedBlurImages.removeAll()
-        if !backdropBlurViews.isEmpty || regionCaptureProvider == nil {
-            syncBackdropBlurViews()
-        }
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -192,9 +311,14 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             guard resolveCapturedBlurImage(for: item, visibleRect: visibleRect) == nil else { continue }
 
             let isDraft = canvasState.activeDraft?.id == item.id
-            let backdropView = backdropBlurViews[item.id] ?? BackdropBlurRegionView(frame: visibleRect)
+            let targetAppearance = BackdropBlurAppearance(
+                borderStyle: isDraft ? .draft : .committed,
+                opacityLevel: item.effectiveBlurOpacity,
+                tintColor: item.blurTintColor
+            )
+            let backdropView = backdropBlurViews[item.id] ?? BackdropBlurRegionView(frame: visibleRect, appearance: targetAppearance)
             backdropView.frame = visibleRect
-            backdropView.applyBorderStyle(isDraft ? .draft : .committed)
+            backdropView.applyAppearance(targetAppearance)
             if backdropView.superview !== self {
                 if let textField = activeTextField, textField.superview === self {
                     addSubview(backdropView, positioned: .below, relativeTo: textField)
@@ -256,10 +380,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let style = item.effectiveBlurStyle
         let clampedWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 2.0), 48.0) : 6.0
         let weightBucket = Int(clampedWeight.rounded())
+        let opacityBucket = item.blurOpacity != nil ? Int((item.effectiveBlurOpacity * 100.0).rounded()) : -weightBucket
 
         if let cached = cachedBlurImages[item.id] {
             let matchesGeometry = cached.rect == integralRect && cached.weight == weightBucket
-            let matchesAppearance = cached.style == style && cached.isDraft == isDraft
+            let matchesStyleAndDraft = cached.style == style && cached.isDraft == isDraft
+            let matchesAppearance = matchesStyleAndDraft && cached.opacityBucket == opacityBucket
             if matchesGeometry && matchesAppearance {
                 return cached.image
             }
@@ -272,7 +398,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         filterItem.isConstrained = false
         filterItem.lineWeight = clampedWeight
         guard let filtered = Self.applyBlurFilter(to: rawImage, item: filterItem) else { return nil }
-        cachedBlurImages[item.id] = (integralRect, style, weightBucket, isDraft, filtered)
+        cachedBlurImages[item.id] = (integralRect, style, weightBucket, opacityBucket, isDraft, filtered)
         return filtered
     }
 
@@ -291,7 +417,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let hasValidRectWidth = rectWidth.isFinite && rectWidth >= 1.0
         let rawScale = hasValidRectWidth ? (Double(image.width) / rectWidth) : 1.0
         let backingScale = rawScale.isFinite ? min(max(rawScale, 1.0), 4.0) : 1.0
-        let pointStrength = 8.0 + clampedWeight * 1.75
+        let pointStrength: Double
+        if item.blurOpacity != nil {
+            pointStrength = 1.5 + item.effectiveBlurOpacity * 34.5
+        } else {
+            pointStrength = 8.0 + clampedWeight * 1.75
+        }
         let pixelStrength = pointStrength * backingScale
 
         let filtered: CIImage
@@ -433,7 +564,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isAutoErase: effectiveAutoErase,
             isShiftDown: isShiftDown,
             isOptionDown: isOptionDown,
-            blurStyle: settings.blurStyle
+            blurStyle: settings.blurStyle,
+            blurOpacity: settings.blurOpacity,
+            blurTintColor: settings.activeBlurTintColor
         )
         syncBackdropBlurViews()
         needsDisplay = true
@@ -479,7 +612,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 isAutoErase: effectiveAutoErase,
                 isShiftDown: flags.contains(.shift),
                 isOptionDown: flags.contains(.option),
-                blurStyle: settings.blurStyle
+                blurStyle: settings.blurStyle,
+                blurOpacity: settings.blurOpacity,
+                blurTintColor: settings.activeBlurTintColor
             )
         }
 
@@ -530,7 +665,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             lineWeight: settings.lineWeight,
             isHighlighter: settings.currentDrawMode == .highlighter,
             isAutoErase: settings.autoEraseEnabled,
-            blurStyle: settings.blurStyle
+            blurStyle: settings.blurStyle,
+            blurOpacity: settings.blurOpacity,
+            blurTintColor: settings.activeBlurTintColor
         )
         syncBackdropBlurViews()
         needsDisplay = true
@@ -581,6 +718,15 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         canvasState.redo()
         syncBackdropBlurViews()
         needsDisplay = true
+    }
+
+    private var shouldAdjustBlurOpacityForWeightShortcut: Bool {
+        if settings.currentDrawMode == .blur {
+            return true
+        }
+        let selectedItems = canvasState.annotations.filter { canvasState.selectedIDs.contains($0.id) }
+        let hasSelectedItems = !selectedItems.isEmpty
+        return hasSelectedItems && selectedItems.allSatisfy { $0.mode == .blur }
     }
 
     @discardableResult
@@ -664,11 +810,25 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         case .blur: settings.selectOrToggleDrawMode(.blur)
         case .clearAnnotate: canvasState.deleteSelectedOrClearAll()
         case .decreaseLineWeight:
-            settings.decreaseLineWeight()
-            onLineWeightChanged?(settings.lineWeight)
+            if shouldAdjustBlurOpacityForWeightShortcut {
+                settings.decreaseBlurOpacity()
+                canvasState.updateSelectedBlurOpacity(settings.blurOpacity)
+                clearBlurCache()
+                onBlurOpacityChanged?(settings.blurOpacity)
+            } else {
+                settings.decreaseLineWeight()
+                onLineWeightChanged?(settings.lineWeight)
+            }
         case .increaseLineWeight:
-            settings.increaseLineWeight()
-            onLineWeightChanged?(settings.lineWeight)
+            if shouldAdjustBlurOpacityForWeightShortcut {
+                settings.increaseBlurOpacity()
+                canvasState.updateSelectedBlurOpacity(settings.blurOpacity)
+                clearBlurCache()
+                onBlurOpacityChanged?(settings.blurOpacity)
+            } else {
+                settings.increaseLineWeight()
+                onLineWeightChanged?(settings.lineWeight)
+            }
         case .setLineWeight:
             if let digit = matched.lineWeightDigit {
                 settings.setLineWeightFromDigit(digit)
@@ -860,16 +1020,52 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 } else {
                     context.saveGState()
                     context.clip(to: visibleRect)
-                    context.setFillColor(NSColor(srgbRed: 0.14, green: 0.18, blue: 0.24, alpha: 1.0).cgColor)
-                    context.fill(visibleRect)
                     if let blurredImage {
+                        context.setFillColor(NSColor(srgbRed: 0.14, green: 0.18, blue: 0.24, alpha: 1.0).cgColor)
+                        context.fill(visibleRect)
                         context.interpolationQuality = .high
                         context.draw(blurredImage, in: visibleRect)
+                        if let tint = item.blurTintColor {
+                            let tintAlpha = CGFloat(0.12 + item.effectiveBlurOpacity * 0.78)
+                            context.setFillColor(tint.nsColor.withAlphaComponent(tintAlpha).cgColor)
+                            context.fill(visibleRect)
+                        } else {
+                            let neutralVeilAlpha = max(0.0, (item.effectiveBlurOpacity - 0.65) * 0.85)
+                            if neutralVeilAlpha > 0 {
+                                context.setFillColor(NSColor.white.withAlphaComponent(CGFloat(neutralVeilAlpha)).cgColor)
+                                context.fill(visibleRect)
+                            }
+                        }
                     } else {
+                        let baseColor: NSColor
+                        let tileColor: NSColor
+                        if let tint = item.blurTintColor {
+                            let mix = min(max(0.25 + item.effectiveBlurOpacity * 0.65, 0.0), 1.0)
+                            let tR = tint.red.isFinite ? min(max(tint.red, 0.0), 1.0) : 0.0
+                            let tG = tint.green.isFinite ? min(max(tint.green, 0.0), 1.0) : 0.0
+                            let tB = tint.blue.isFinite ? min(max(tint.blue, 0.0), 1.0) : 0.0
+                            baseColor = NSColor(
+                                srgbRed: CGFloat(0.14 * (1.0 - mix) + tR * mix),
+                                green: CGFloat(0.18 * (1.0 - mix) + tG * mix),
+                                blue: CGFloat(0.24 * (1.0 - mix) + tB * mix),
+                                alpha: 1.0
+                            )
+                            tileColor = NSColor(
+                                srgbRed: CGFloat(0.20 * (1.0 - mix) + tR * mix),
+                                green: CGFloat(0.26 * (1.0 - mix) + tG * mix),
+                                blue: CGFloat(0.34 * (1.0 - mix) + tB * mix),
+                                alpha: 1.0
+                            )
+                        } else {
+                            baseColor = NSColor(srgbRed: 0.14, green: 0.18, blue: 0.24, alpha: 1.0)
+                            tileColor = NSColor(srgbRed: 0.20, green: 0.26, blue: 0.34, alpha: 1.0)
+                        }
+                        context.setFillColor(baseColor.cgColor)
+                        context.fill(visibleRect)
                         let tileSize = max(10.0, max(visibleRect.width, visibleRect.height) / 32.0)
                         let cols = Int(ceil(visibleRect.width / tileSize))
                         let rows = Int(ceil(visibleRect.height / tileSize))
-                        context.setFillColor(NSColor(srgbRed: 0.20, green: 0.26, blue: 0.34, alpha: 1.0).cgColor)
+                        context.setFillColor(tileColor.cgColor)
                         for row in 0..<rows {
                             for col in 0..<cols where (row + col).isMultiple(of: 2) {
                                 let tileRect = CGRect(
@@ -1099,6 +1295,12 @@ public final class AnnotateOverlayController {
             view.onLineWeightChanged = { [weak self] weight in
                 self?.toastController.showToast(.lineWeight, message: "Line Weight: \(Int(weight)) pt")
             }
+            view.onBlurOpacityChanged = { [weak self] opacity in
+                self?.toastController.showToast(
+                    .lineWeight,
+                    message: "Blur Opacity: \(Int((opacity * 100.0).rounded()))%"
+                )
+            }
             view.exclusionScreenRectsProvider = { [weak self] in
                 self?.visibleAuxiliaryPanelRects() ?? []
             }
@@ -1200,7 +1402,9 @@ public final class AnnotateOverlayController {
             return
         }
         let windowID = panel.flatMap { $0.windowNumber > 0 ? CGWindowID($0.windowNumber) : nil }
-        captureManager.startStream(excludingWindowID: windowID)
+        let targetScreen = panel?.screen ?? NSScreen.main
+        let preferredDisplayID = targetScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        captureManager.startStream(excludingWindowID: windowID, preferredDisplayID: preferredDisplayID)
     }
 
     private func visibleAuxiliaryPanelRects() -> [NSRect] {
@@ -1225,9 +1429,42 @@ public final class AnnotateOverlayController {
                 guard let self, self.settings.isAnnotating else { return }
                 self.canvasView?.commitActiveTextEditing()
                 self.updateBlurCaptureStream()
+                self.updateAuxiliaryPanels()
                 self.panel?.makeKey()
                 self.panel?.makeFirstResponder(self.canvasView)
                 self.canvasView?.needsDisplay = true
+            }
+            .store(in: &cancellables)
+
+        settings.$blurOpacity
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] newOpacity in
+                guard let self else { return }
+                self.canvasState.updateSelectedBlurOpacity(newOpacity)
+                self.canvasView?.clearBlurCache()
+            }
+            .store(in: &cancellables)
+
+        settings.$blurStyle
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] newStyle in
+                guard let self else { return }
+                self.canvasState.updateSelectedBlurStyle(newStyle)
+                self.canvasView?.clearBlurCache()
+            }
+            .store(in: &cancellables)
+
+        settings.$blurUseCustomColor
+            .combineLatest(settings.$blurCustomColor)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _ in
+                guard let self else { return }
+                self.canvasState.updateSelectedBlurTintColor(self.settings.activeBlurTintColor)
+                self.canvasView?.clearBlurCache()
+                self.updateAuxiliaryPanels()
             }
             .store(in: &cancellables)
 
@@ -1292,6 +1529,7 @@ public final class AnnotateOverlayController {
             if controlsPanel == nil {
                 let toolbarView = AnnotateControlsView(
                     settings: settings,
+                    canvasState: canvasState,
                     onUndo: { [weak self] in self?.canvasState.undo() },
                     onRedo: { [weak self] in self?.canvasState.redo() },
                     onSaveScreenshot: { [weak self] in _ = self?.saveScreenshot() },
@@ -1317,10 +1555,12 @@ public final class AnnotateOverlayController {
                 }
                 controlsPanel = cPanel
             } else if let cPanel = controlsPanel, let hosting = cPanel.contentView {
+                hosting.layoutSubtreeIfNeeded()
                 let fitting = hosting.fittingSize
                 let hasValidFittingSize = fitting.width > 0 && fitting.height > 0
                 if hasValidFittingSize && cPanel.frame.size != fitting {
                     cPanel.setContentSize(fitting)
+                    hosting.frame = NSRect(origin: .zero, size: fitting)
                 }
             }
             controlsPanel?.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)

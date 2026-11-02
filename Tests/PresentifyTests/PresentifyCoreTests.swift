@@ -1492,7 +1492,7 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(view.backdropBlurViews.count, 1)
         if let draftID = canvas.activeDraft?.id, let draftBackdrop = view.backdropBlurViews[draftID] {
             XCTAssertEqual(draftBackdrop.borderStyle, .draft)
-            XCTAssertEqual(draftBackdrop.layer?.borderWidth ?? 0, 1.5, accuracy: 1e-6)
+            XCTAssertEqual(draftBackdrop.borderWidth, 1.5, accuracy: 1e-6)
         } else {
             XCTFail("Expected draft BackdropBlurRegionView while dragging blur stroke")
         }
@@ -1506,14 +1506,14 @@ final class PresentifyCoreTests: XCTestCase {
             return
         }
         XCTAssertTrue(backdropView.superview === view)
-        XCTAssertEqual(backdropView.blendingMode, .behindWindow)
-        XCTAssertEqual(backdropView.material, .selection)
-        XCTAssertFalse(backdropView.isEmphasized)
-        XCTAssertEqual(backdropView.state, .active)
+        XCTAssertEqual(backdropView.glassTier, .regular)
+        XCTAssertEqual(backdropView.opacityLevel, 0.55, accuracy: 1e-6)
+        XCTAssertNil(backdropView.tintColor)
+        XCTAssertNotEqual(backdropView.layer?.masksToBounds, true)
         XCTAssertNil(backdropView.hitTest(NSPoint(x: 10, y: 10)))
         XCTAssertEqual(backdropView.frame, CGRect(x: 60, y: 60, width: 180, height: 120))
         XCTAssertEqual(backdropView.borderStyle, .committed)
-        XCTAssertEqual(backdropView.layer?.borderWidth ?? 0, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(backdropView.borderWidth, 1.0, accuracy: 1e-6)
 
         guard let exportedPNG = Screenshotter.renderViewToPNGData(view),
               let exportedCG = NSBitmapImageRep(data: exportedPNG)?.cgImage else {
@@ -1772,5 +1772,519 @@ final class PresentifyCoreTests: XCTestCase {
         guard drew else { return nil }
         let offset = (point.y * image.width + point.x) * 4
         return (bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3])
+    }
+
+    func testBlurOpacityAndOptionalCustomTintSettingsLifecycle() {
+        let settings = AppSettings(defaults: testDefaults)
+        XCTAssertEqual(settings.blurOpacity, 0.55, accuracy: 1e-6)
+        XCTAssertFalse(settings.blurUseCustomColor)
+        XCTAssertEqual(settings.blurCustomColor, AppSettings.defaultBlurCustomColor)
+        XCTAssertNil(settings.activeBlurTintColor)
+
+        settings.blurOpacity = 0.01
+        XCTAssertEqual(settings.blurOpacity, 0.10, accuracy: 1e-6)
+        settings.blurOpacity = 2.50
+        XCTAssertEqual(settings.blurOpacity, 1.00, accuracy: 1e-6)
+        settings.blurOpacity = .nan
+        XCTAssertEqual(settings.blurOpacity, 0.55, accuracy: 1e-6)
+        settings.blurOpacity = .infinity
+        XCTAssertEqual(settings.blurOpacity, 0.55, accuracy: 1e-6)
+
+        settings.blurOpacity = 0.55
+        settings.increaseBlurOpacity()
+        XCTAssertEqual(settings.blurOpacity, 0.65, accuracy: 1e-6)
+        settings.decreaseBlurOpacity()
+        XCTAssertEqual(settings.blurOpacity, 0.55, accuracy: 1e-6)
+        settings.blurOpacity = 0.95
+        settings.increaseBlurOpacity()
+        XCTAssertEqual(settings.blurOpacity, 1.00, accuracy: 1e-6)
+        settings.blurOpacity = 0.15
+        settings.decreaseBlurOpacity()
+        XCTAssertEqual(settings.blurOpacity, 0.10, accuracy: 1e-6)
+
+        let customMint = RGBColor(red: 0.12, green: 0.84, blue: 0.52)
+        settings.setCustomBlurTintColor(customMint)
+        XCTAssertTrue(settings.blurUseCustomColor)
+        XCTAssertEqual(settings.blurCustomColor, customMint)
+        XCTAssertEqual(settings.activeBlurTintColor, customMint)
+
+        settings.blurUseCustomColor = false
+        XCTAssertEqual(settings.blurCustomColor, customMint)
+        XCTAssertNil(settings.activeBlurTintColor)
+
+        settings.blurUseCustomColor = true
+        settings.blurOpacity = 0.80
+        let reloaded = AppSettings(defaults: testDefaults)
+        XCTAssertEqual(reloaded.blurOpacity, 0.80, accuracy: 1e-6)
+        XCTAssertTrue(reloaded.blurUseCustomColor)
+        XCTAssertEqual(reloaded.blurCustomColor, customMint)
+        XCTAssertEqual(reloaded.activeBlurTintColor, customMint)
+
+        testDefaults.set(Double.infinity, forKey: "presentify.blurOpacity")
+        let sanitizedFromDefaults = AppSettings(defaults: testDefaults)
+        XCTAssertEqual(sanitizedFromDefaults.blurOpacity, 0.55, accuracy: 1e-6)
+
+        reloaded.restoreDefaults()
+        XCTAssertEqual(reloaded.blurOpacity, 0.55, accuracy: 1e-6)
+        XCTAssertFalse(reloaded.blurUseCustomColor)
+        XCTAssertEqual(reloaded.blurCustomColor, AppSettings.defaultBlurCustomColor)
+        XCTAssertNil(reloaded.activeBlurTintColor)
+
+        CustomColorPanelBridge.shared.presentForBlurTint(for: reloaded)
+        XCTAssertEqual(CustomColorPanelBridge.shared.activeTarget, .blurTint)
+        CustomColorPanelBridge.shared.present(for: reloaded)
+        XCTAssertEqual(CustomColorPanelBridge.shared.activeTarget, .stroke)
+        CustomColorPanelBridge.shared.close()
+    }
+
+    func testBlurAnnotationShortcutsSelectionMutatorsAndSessionSanitization() throws {
+        let legacyBlur = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 10, y: 10),
+            endPoint: CGPoint(x: 90, y: 70),
+            strokeColor: .blue,
+            lineWeight: 6.0
+        )
+        XCTAssertNil(legacyBlur.blurOpacity)
+        XCTAssertEqual(legacyBlur.effectiveBlurOpacity, 0.55, accuracy: 1e-6)
+        XCTAssertNil(legacyBlur.blurTintColor)
+
+        var clampedItem = legacyBlur
+        clampedItem.blurOpacity = 0.02
+        XCTAssertEqual(clampedItem.effectiveBlurOpacity, 0.10, accuracy: 1e-6)
+        clampedItem.blurOpacity = 1.90
+        XCTAssertEqual(clampedItem.effectiveBlurOpacity, 1.00, accuracy: 1e-6)
+        clampedItem.blurOpacity = .nan
+        XCTAssertEqual(clampedItem.effectiveBlurOpacity, 0.55, accuracy: 1e-6)
+
+        let settings = AppSettings(defaults: testDefaults)
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let view = AnnotateCanvasView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 240),
+            canvasState: canvas,
+            settings: settings,
+            shortcutManager: shortcuts
+        )
+
+        var reportedLineWeights: [Double] = []
+        var reportedBlurOpacities: [Double] = []
+        view.onLineWeightChanged = { reportedLineWeights.append($0) }
+        view.onBlurOpacityChanged = { reportedBlurOpacities.append($0) }
+
+        settings.currentDrawMode = .freeHand
+        settings.lineWeight = 6.0
+        settings.blurOpacity = 0.55
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(settings.lineWeight, 8.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.blurOpacity, 0.55, accuracy: 1e-6)
+        XCTAssertEqual(reportedLineWeights.count, 1)
+        XCTAssertTrue(reportedBlurOpacities.isEmpty)
+
+        settings.currentDrawMode = .blur
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(settings.lineWeight, 8.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.blurOpacity, 0.65, accuracy: 1e-6)
+        XCTAssertEqual(reportedBlurOpacities.count, 1)
+        XCTAssertEqual(reportedBlurOpacities.last ?? 0, 0.65, accuracy: 1e-6)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(settings.blurOpacity, 0.55, accuracy: 1e-6)
+        XCTAssertEqual(reportedBlurOpacities.count, 2)
+        XCTAssertEqual(reportedBlurOpacities.last ?? 0, 0.55, accuracy: 1e-6)
+
+        let blurEntry = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 20, y: 20),
+            endPoint: CGPoint(x: 120, y: 100),
+            strokeColor: .blue,
+            lineWeight: 6.0,
+            blurStyle: .gaussian,
+            blurOpacity: 0.40,
+            blurTintColor: nil
+        )
+        let rectEntry = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 140, y: 20),
+            endPoint: CGPoint(x: 220, y: 100),
+            strokeColor: .red,
+            lineWeight: 6.0
+        )
+        canvas.annotations = [blurEntry, rectEntry]
+        canvas.selectedIDs = [blurEntry.id]
+        settings.currentDrawMode = .rectangle
+        settings.blurOpacity = 0.40
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(settings.blurOpacity, 0.50, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].effectiveBlurOpacity, 0.50, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 8.0, accuracy: 1e-6)
+
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].effectiveBlurOpacity, 0.40, accuracy: 1e-6)
+        canvas.redo()
+        XCTAssertEqual(canvas.annotations[0].effectiveBlurOpacity, 0.50, accuracy: 1e-6)
+
+        canvas.selectedIDs = [blurEntry.id]
+        let undoCountBeforeNoOp = canvas.undoStack.count
+        canvas.updateSelectedBlurOpacity(0.50)
+        XCTAssertEqual(canvas.undoStack.count, undoCountBeforeNoOp)
+
+        canvas.updateSelectedBlurTintColor(.green)
+        XCTAssertEqual(canvas.annotations[0].blurTintColor, .green)
+        XCTAssertNil(canvas.annotations[1].blurTintColor)
+        canvas.undo()
+        XCTAssertNil(canvas.annotations[0].blurTintColor)
+        canvas.redo()
+        XCTAssertEqual(canvas.annotations[0].blurTintColor, .green)
+
+        canvas.selectedIDs = [blurEntry.id]
+        canvas.updateSelectedBlurTintColor(nil)
+        XCTAssertNil(canvas.annotations[0].blurTintColor)
+
+        canvas.updateSelectedBlurStyle(.pixelate)
+        XCTAssertEqual(canvas.annotations[0].blurStyle, .pixelate)
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].blurStyle, .gaussian)
+
+        canvas.selectedIDs = [blurEntry.id, rectEntry.id]
+        let previousOpacity = settings.blurOpacity
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(settings.blurOpacity, previousOpacity, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 10.0, accuracy: 1e-6)
+
+        let overlay = AnnotateOverlayController(settings: settings, shortcutManager: shortcuts, canvasState: AnnotationCanvasState())
+        settings.currentDrawMode = .blur
+        settings.blurOpacity = 0.55
+        overlay.showAnnotation()
+        _ = overlay.canvasView?.handleKeyCommand(keyCode: 0x1E, modifiers: 0)
+        XCTAssertEqual(overlay.toastController.currentMessage, "Blur Opacity: 65%")
+        overlay.hideAnnotation()
+
+        let baseEncoded = try JSONEncoder().encode([blurEntry])
+        var rawArray = try XCTUnwrap(JSONSerialization.jsonObject(with: baseEncoded) as? [[String: Any]])
+        rawArray[0].removeValue(forKey: "blurOpacity")
+        rawArray[0].removeValue(forKey: "blurTintColor")
+        let legacyJSON = try JSONSerialization.data(withJSONObject: rawArray)
+        let importedCanvas = AnnotationCanvasState()
+        XCTAssertTrue(importedCanvas.importSessionData(legacyJSON))
+        XCTAssertEqual(importedCanvas.annotations.count, 1)
+        XCTAssertNil(importedCanvas.annotations[0].blurOpacity)
+        XCTAssertEqual(importedCanvas.annotations[0].effectiveBlurOpacity, 0.55, accuracy: 1e-6)
+        XCTAssertNil(importedCanvas.annotations[0].blurTintColor)
+
+        let outOfRangeItems = [
+            AnnotationItem(
+                mode: .blur,
+                startPoint: CGPoint(x: 0, y: 0),
+                endPoint: CGPoint(x: 50, y: 50),
+                strokeColor: .blue,
+                lineWeight: 6.0,
+                blurOpacity: -3.0,
+                blurTintColor: RGBColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 0.2)
+            ),
+            AnnotationItem(
+                mode: .blur,
+                startPoint: CGPoint(x: 60, y: 60),
+                endPoint: CGPoint(x: 120, y: 120),
+                strokeColor: .blue,
+                lineWeight: 6.0,
+                blurOpacity: 5.0
+            )
+        ]
+        let encodedOut = try JSONEncoder().encode(outOfRangeItems)
+        importedCanvas.importSessionData(encodedOut)
+        XCTAssertEqual(importedCanvas.annotations.count, 2)
+        XCTAssertEqual(importedCanvas.annotations[0].blurOpacity ?? 0, 0.10, accuracy: 1e-6)
+        XCTAssertEqual(importedCanvas.annotations[0].blurTintColor?.alpha ?? 0, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(importedCanvas.annotations[1].blurOpacity ?? 0, 1.00, accuracy: 1e-6)
+    }
+
+    func testMonotonicBlurFilterAcrossOpacityLevels() {
+        guard let splitSource = makeTestSourceImage(size: 160),
+              let rampSource = makeHorizontalGradientImage(size: 160) else {
+            XCTFail("Expected synthetic test source images")
+            return
+        }
+
+        let gaussianLow = AnnotationItem(
+            mode: .blur,
+            startPoint: .zero,
+            endPoint: CGPoint(x: 160, y: 160),
+            strokeColor: .blue,
+            lineWeight: 6.0,
+            blurStyle: .gaussian,
+            blurOpacity: 0.15
+        )
+        var gaussianMid = gaussianLow
+        gaussianMid.blurOpacity = 0.55
+        var gaussianHigh = gaussianLow
+        gaussianHigh.blurOpacity = 1.00
+
+        guard let gImgLow = AnnotateCanvasView.applyBlurFilter(to: splitSource, item: gaussianLow),
+              let gImgMid = AnnotateCanvasView.applyBlurFilter(to: splitSource, item: gaussianMid),
+              let gImgHigh = AnnotateCanvasView.applyBlurFilter(to: splitSource, item: gaussianHigh),
+              let pxLow = rgbaPixel(in: gImgLow, at: (x: 62, y: 80)),
+              let pxMid = rgbaPixel(in: gImgMid, at: (x: 62, y: 80)),
+              let pxHigh = rgbaPixel(in: gImgHigh, at: (x: 62, y: 80)) else {
+            XCTFail("Expected Gaussian blurred outputs across opacity levels")
+            return
+        }
+        XCTAssertLessThan(pxLow.b, pxMid.b)
+        XCTAssertLessThan(pxMid.b, pxHigh.b)
+
+        var pixelLow = gaussianLow
+        pixelLow.blurStyle = .pixelate
+        var pixelMid = gaussianMid
+        pixelMid.blurStyle = .pixelate
+        var pixelHigh = gaussianHigh
+        pixelHigh.blurStyle = .pixelate
+
+        guard let pImgLow = AnnotateCanvasView.applyBlurFilter(to: rampSource, item: pixelLow),
+              let pImgMid = AnnotateCanvasView.applyBlurFilter(to: rampSource, item: pixelMid),
+              let pImgHigh = AnnotateCanvasView.applyBlurFilter(to: rampSource, item: pixelHigh) else {
+            XCTFail("Expected Pixelate blurred outputs across opacity levels")
+            return
+        }
+        let runLow = maxConstantRunLength(in: pImgLow, row: 80)
+        let runMid = maxConstantRunLength(in: pImgMid, row: 80)
+        let runHigh = maxConstantRunLength(in: pImgHigh, row: 80)
+        XCTAssertLessThan(runLow, runMid)
+        XCTAssertLessThan(runMid, runHigh)
+    }
+
+    func testScreenCaptureWindowExclusionAndDisplayResolution() {
+        let context = ScreenCaptureManager.WindowExclusionContext(
+            currentPID: 4242,
+            excludingWindowID: 900,
+            normalWindowLayer: 0
+        )
+
+        let ownSettingsWindow = ScreenCaptureManager.WindowExclusionCandidate(windowID: 101, owningPID: 4242, windowLayer: 0)
+        XCTAssertFalse(ScreenCaptureManager.shouldExcludeWindow(ownSettingsWindow, context: context))
+
+        let ownSubNormalWindow = ScreenCaptureManager.WindowExclusionCandidate(windowID: 102, owningPID: 4242, windowLayer: -1)
+        XCTAssertFalse(ScreenCaptureManager.shouldExcludeWindow(ownSubNormalWindow, context: context))
+
+        let ownFloatingOverlay = ScreenCaptureManager.WindowExclusionCandidate(windowID: 103, owningPID: 4242, windowLayer: 1000)
+        XCTAssertTrue(ScreenCaptureManager.shouldExcludeWindow(ownFloatingOverlay, context: context))
+
+        let explicitExcluded = ScreenCaptureManager.WindowExclusionCandidate(windowID: 900, owningPID: 9999, windowLayer: 0)
+        XCTAssertTrue(ScreenCaptureManager.shouldExcludeWindow(explicitExcluded, context: context))
+
+        let otherAppNormal = ScreenCaptureManager.WindowExclusionCandidate(windowID: 205, owningPID: 7777, windowLayer: 0)
+        XCTAssertFalse(ScreenCaptureManager.shouldExcludeWindow(otherAppNormal, context: context))
+
+        let otherAppFloating = ScreenCaptureManager.WindowExclusionCandidate(windowID: 206, owningPID: 7777, windowLayer: 25)
+        XCTAssertFalse(ScreenCaptureManager.shouldExcludeWindow(otherAppFloating, context: context))
+
+        XCTAssertNil(ScreenCaptureManager.resolveTargetDisplayID(availableDisplayIDs: [], preferredDisplayID: 10))
+        XCTAssertEqual(
+            ScreenCaptureManager.resolveTargetDisplayID(availableDisplayIDs: [10, 20, 30], preferredDisplayID: 20),
+            20
+        )
+        XCTAssertEqual(
+            ScreenCaptureManager.resolveTargetDisplayID(availableDisplayIDs: [10, 20, 30], preferredDisplayID: 99),
+            10
+        )
+        XCTAssertEqual(
+            ScreenCaptureManager.resolveTargetDisplayID(availableDisplayIDs: [10, 20], preferredDisplayID: nil),
+            10
+        )
+    }
+
+    func testBackdropGlassTiersAppearanceSyncAndTintedOpaqueExport() {
+        XCTAssertEqual(BackdropGlassTier.from(opacity: 0.10), .ultraThin)
+        XCTAssertEqual(BackdropGlassTier.from(opacity: 0.25), .ultraThin)
+        XCTAssertEqual(BackdropGlassTier.from(opacity: 0.35), .thin)
+        XCTAssertEqual(BackdropGlassTier.from(opacity: 0.55), .regular)
+        XCTAssertEqual(BackdropGlassTier.from(opacity: 0.75), .thick)
+        XCTAssertEqual(BackdropGlassTier.from(opacity: 0.95), .ultraThick)
+        XCTAssertEqual(BackdropGlassTier.from(opacity: 1.00), .ultraThick)
+        XCTAssertEqual(BackdropGlassTier.from(opacity: .nan), .regular)
+
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateToolIndicator = false
+        settings.whiteboardEnabled = false
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let view = AnnotateCanvasView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 200),
+            canvasState: canvas,
+            settings: settings,
+            shortcutManager: shortcuts
+        )
+
+        let blurItem = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 40, y: 40),
+            endPoint: CGPoint(x: 200, y: 160),
+            strokeColor: .blue,
+            lineWeight: 6.0,
+            blurStyle: .gaussian,
+            blurOpacity: 0.20,
+            blurTintColor: nil
+        )
+        canvas.annotations = [blurItem]
+        view.syncBackdropBlurViews()
+        guard let backdrop = view.backdropBlurViews[blurItem.id] else {
+            XCTFail("Expected mounted BackdropBlurRegionView")
+            return
+        }
+        XCTAssertEqual(backdrop.glassTier, .ultraThin)
+        XCTAssertEqual(backdrop.opacityLevel, 0.20, accuracy: 1e-6)
+        XCTAssertNil(backdrop.tintColor)
+
+        canvas.selectedIDs = [blurItem.id]
+        canvas.updateSelectedBlurOpacity(0.92)
+        view.syncBackdropBlurViews()
+        XCTAssertEqual(backdrop.glassTier, .ultraThick)
+        XCTAssertEqual(backdrop.opacityLevel, 0.92, accuracy: 1e-6)
+
+        canvas.updateSelectedBlurTintColor(.red)
+        view.syncBackdropBlurViews()
+        XCTAssertEqual(backdrop.tintColor, .red)
+
+        guard let redFallbackPNG = Screenshotter.renderViewToPNGData(view),
+              let redFallbackCG = NSBitmapImageRep(data: redFallbackPNG)?.cgImage,
+              let redFallbackPx = rgbaPixel(in: redFallbackCG, at: (x: redFallbackCG.width / 2, y: redFallbackCG.height / 2)) else {
+            XCTFail("Expected opaque red-tinted fallback PNG")
+            return
+        }
+        XCTAssertEqual(redFallbackPx.a, 255)
+        XCTAssertGreaterThan(Int(redFallbackPx.r), Int(redFallbackPx.g) + 80)
+        XCTAssertGreaterThan(Int(redFallbackPx.r), Int(redFallbackPx.b) + 80)
+
+        canvas.updateSelectedBlurTintColor(.green)
+        view.syncBackdropBlurViews()
+        guard let greenFallbackPNG = Screenshotter.renderViewToPNGData(view),
+              let greenFallbackCG = NSBitmapImageRep(data: greenFallbackPNG)?.cgImage,
+              let greenFallbackPx = rgbaPixel(in: greenFallbackCG, at: (x: greenFallbackCG.width / 2, y: greenFallbackCG.height / 2)) else {
+            XCTFail("Expected opaque green-tinted fallback PNG")
+            return
+        }
+        XCTAssertEqual(greenFallbackPx.a, 255)
+        XCTAssertGreaterThan(Int(greenFallbackPx.g), Int(greenFallbackPx.r) + 80)
+        XCTAssertGreaterThan(Int(greenFallbackPx.g), Int(greenFallbackPx.b) + 80)
+
+        view.regionCaptureProvider = { _ in
+            self.makeSolidGrayImage(size: 160, gray: 120)
+        }
+        canvas.updateSelectedBlurTintColor(nil)
+        canvas.updateSelectedBlurOpacity(0.30)
+        view.clearBlurCache()
+        guard let neutralLowPNG = Screenshotter.renderViewToPNGData(view),
+              let neutralLowCG = NSBitmapImageRep(data: neutralLowPNG)?.cgImage,
+              let neutralLowPx = rgbaPixel(in: neutralLowCG, at: (x: neutralLowCG.width / 2, y: neutralLowCG.height / 2)) else {
+            XCTFail("Expected captured neutral low-opacity PNG")
+            return
+        }
+
+        canvas.updateSelectedBlurOpacity(1.00)
+        view.clearBlurCache()
+        guard let neutralHighPNG = Screenshotter.renderViewToPNGData(view),
+              let neutralHighCG = NSBitmapImageRep(data: neutralHighPNG)?.cgImage,
+              let neutralHighPx = rgbaPixel(in: neutralHighCG, at: (x: neutralHighCG.width / 2, y: neutralHighCG.height / 2)) else {
+            XCTFail("Expected captured neutral high-opacity PNG")
+            return
+        }
+        XCTAssertEqual(neutralLowPx.a, 255)
+        XCTAssertEqual(neutralHighPx.a, 255)
+        XCTAssertGreaterThan(neutralHighPx.r, neutralLowPx.r)
+
+        canvas.updateSelectedBlurOpacity(0.85)
+        canvas.updateSelectedBlurTintColor(.red)
+        view.clearBlurCache()
+        guard let redCapturedPNG = Screenshotter.renderViewToPNGData(view),
+              let redCapturedCG = NSBitmapImageRep(data: redCapturedPNG)?.cgImage,
+              let redCapturedPx = rgbaPixel(in: redCapturedCG, at: (x: redCapturedCG.width / 2, y: redCapturedCG.height / 2)) else {
+            XCTFail("Expected captured red-tinted PNG")
+            return
+        }
+        XCTAssertEqual(redCapturedPx.a, 255)
+        XCTAssertGreaterThan(Int(redCapturedPx.r), Int(redCapturedPx.g) + 60)
+        XCTAssertGreaterThan(Int(redCapturedPx.r), Int(redCapturedPx.b) + 60)
+    }
+
+    private func makeHorizontalGradientImage(size: Int) -> CGImage? {
+        var bytes = [UInt8](repeating: 0, count: size * size * 4)
+        let denom = max(1, size - 1)
+        for y in 0..<size {
+            for x in 0..<size {
+                let offset = (y * size + x) * 4
+                let value = UInt8((x * 255) / denom)
+                bytes[offset] = value
+                bytes[offset + 1] = value
+                bytes[offset + 2] = value
+                bytes[offset + 3] = 255
+            }
+        }
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        return bytes.withUnsafeMutableBytes { rawBuffer in
+            guard let context = CGContext(
+                data: rawBuffer.baseAddress,
+                width: size,
+                height: size,
+                bitsPerComponent: 8,
+                bytesPerRow: size * 4,
+                space: space,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return nil
+            }
+            return context.makeImage()
+        }
+    }
+
+    private func makeSolidGrayImage(size: Int, gray: UInt8) -> CGImage? {
+        var bytes = [UInt8](repeating: gray, count: size * size * 4)
+        for idx in stride(from: 3, to: bytes.count, by: 4) {
+            bytes[idx] = 255
+        }
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        return bytes.withUnsafeMutableBytes { rawBuffer in
+            guard let context = CGContext(
+                data: rawBuffer.baseAddress,
+                width: size,
+                height: size,
+                bitsPerComponent: 8,
+                bytesPerRow: size * 4,
+                space: space,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return nil
+            }
+            return context.makeImage()
+        }
+    }
+
+    private func maxConstantRunLength(in image: CGImage, row: Int) -> Int {
+        var maxRun = 0
+        var currentRun = 0
+        var previous: (r: UInt8, g: UInt8, b: UInt8)?
+        let startX = min(20, max(0, image.width - 1))
+        let endX = max(startX, image.width - 20)
+        for x in startX..<endX {
+            guard let px = rgbaPixel(in: image, at: (x: x, y: row)) else { continue }
+            let matchesPrevious: Bool
+            if let prev = previous {
+                let sameRG = prev.r == px.r && prev.g == px.g
+                matchesPrevious = sameRG && prev.b == px.b
+            } else {
+                matchesPrevious = false
+            }
+            if matchesPrevious {
+                currentRun += 1
+            } else {
+                currentRun = 1
+                previous = (px.r, px.g, px.b)
+            }
+            if currentRun > maxRun {
+                maxRun = currentRun
+            }
+        }
+        return maxRun
     }
 }

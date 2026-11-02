@@ -14,6 +14,8 @@ public final class AppSettings: ObservableObject {
         .blue
     ]
     public static let defaultHighlightColor: RGBColor = .blue
+    public static let defaultBlurOpacity: Double = 0.55
+    public static let defaultBlurCustomColor = RGBColor(red: 0.08, green: 0.52, blue: 0.98)
 
     public let defaults: UserDefaults
     private var isRestoring = false
@@ -75,6 +77,22 @@ public final class AppSettings: ObservableObject {
     }
     @Published public var blurStyle: BlurStyle {
         didSet { persistCodable(blurStyle, forKey: Keys.blurStyle) }
+    }
+    @Published public var blurOpacity: Double {
+        didSet {
+            let sanitized = blurOpacity.isFinite ? min(max(blurOpacity, 0.10), 1.00) : Self.defaultBlurOpacity
+            if sanitized != blurOpacity {
+                blurOpacity = sanitized
+                return
+            }
+            persist(blurOpacity, forKey: Keys.blurOpacity)
+        }
+    }
+    @Published public var blurUseCustomColor: Bool {
+        didSet { persist(blurUseCustomColor, forKey: Keys.blurUseCustomColor) }
+    }
+    @Published public var blurCustomColor: RGBColor {
+        didSet { persistCodable(blurCustomColor, forKey: Keys.blurCustomColor) }
     }
     @Published public var minLineWeight: Double {
         didSet { persist(minLineWeight, forKey: Keys.minLineWeight) }
@@ -393,6 +411,10 @@ public final class AppSettings: ObservableObject {
         self.activeGradient = Self.loadCodable(from: defaults, key: Keys.activeGradient, fallback: GradientGenerator.presets[0])
         self.currentDrawMode = Self.loadCodable(from: defaults, key: Keys.currentDrawMode, fallback: .freeHand)
         self.blurStyle = Self.loadCodable(from: defaults, key: Keys.blurStyle, fallback: .gaussian)
+        let rawBlurOpacity = Self.loadDouble(from: defaults, key: Keys.blurOpacity, fallback: Self.defaultBlurOpacity)
+        self.blurOpacity = rawBlurOpacity.isFinite ? min(max(rawBlurOpacity, 0.10), 1.00) : Self.defaultBlurOpacity
+        self.blurUseCustomColor = Self.loadBool(from: defaults, key: Keys.blurUseCustomColor, fallback: false)
+        self.blurCustomColor = Self.loadCodable(from: defaults, key: Keys.blurCustomColor, fallback: Self.defaultBlurCustomColor)
         self.minLineWeight = minWeight
         self.maxLineWeight = maxWeight
         self.lineWeight = min(max(Self.loadDouble(from: defaults, key: Keys.lineWeight, fallback: 6.0), minWeight), maxWeight)
@@ -465,6 +487,10 @@ public final class AppSettings: ObservableObject {
         return activeGradient
     }
 
+    public var activeBlurTintColor: RGBColor? {
+        blurUseCustomColor ? blurCustomColor : nil
+    }
+
     public func selectFavoriteColor(index: Int) {
         guard index >= 0 && index < favColors.count else { return }
         useRandomColors = false
@@ -485,6 +511,11 @@ public final class AppSettings: ObservableObject {
         selectedColorIndex = safeIndex
     }
 
+    public func setCustomBlurTintColor(_ color: RGBColor) {
+        blurCustomColor = color
+        blurUseCustomColor = true
+    }
+
     public func selectRandomColors() {
         useRandomColors = true
         enableGradients = true
@@ -501,6 +532,18 @@ public final class AppSettings: ObservableObject {
         } else {
             currentDrawMode = mode
         }
+    }
+
+    public func increaseBlurOpacity(step: Double = 0.10) {
+        let safeStep = step.isFinite ? step : 0.10
+        let stepped = min(max(blurOpacity + safeStep, 0.10), 1.00)
+        blurOpacity = (stepped * 100.0).rounded() / 100.0
+    }
+
+    public func decreaseBlurOpacity(step: Double = 0.10) {
+        let safeStep = step.isFinite ? step : 0.10
+        let stepped = min(max(blurOpacity - safeStep, 0.10), 1.00)
+        blurOpacity = (stepped * 100.0).rounded() / 100.0
     }
 
     public func increaseLineWeight(step: Double = 2.0) {
@@ -568,6 +611,9 @@ public final class AppSettings: ObservableObject {
         activeGradient = GradientGenerator.presets[0]
         currentDrawMode = .freeHand
         blurStyle = .gaussian
+        blurOpacity = Self.defaultBlurOpacity
+        blurUseCustomColor = false
+        blurCustomColor = Self.defaultBlurCustomColor
         minLineWeight = 2.0
         maxLineWeight = 24.0
         lineWeight = 6.0
@@ -693,6 +739,9 @@ public final class AppSettings: ObservableObject {
         static let activeGradient = "presentify.activeGradient"
         static let currentDrawMode = "presentify.currentDrawMode"
         static let blurStyle = "presentify.blurStyle"
+        static let blurOpacity = "presentify.blurOpacity"
+        static let blurUseCustomColor = "presentify.blurUseCustomColor"
+        static let blurCustomColor = "presentify.blurCustomColor"
         static let minLineWeight = "presentify.minLineWeight"
         static let maxLineWeight = "presentify.maxLineWeight"
         static let lineWeight = "presentify.lineWeight"
@@ -748,7 +797,8 @@ public final class AppSettings: ObservableObject {
             hasCompletedWelcomeTour, interactiveModeKey,
             annotateInteractiveMode, selectedSettingsTab, favColors,
             selectedColorIndex, useRandomColors, enableGradients, activeGradient,
-            currentDrawMode, blurStyle, minLineWeight, maxLineWeight, lineWeight,
+            currentDrawMode, blurStyle, blurOpacity, blurUseCustomColor, blurCustomColor,
+            minLineWeight, maxLineWeight, lineWeight,
             autoEraseEnabled, autoEraseDelay, showAnnotateControls,
             annotateControlsVertical, autoHideAnnotateControls, whiteboardEnabled,
             whiteboardColor, whiteboardOpacity, touchDrawEnabled,

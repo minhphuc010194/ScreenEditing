@@ -219,19 +219,39 @@ public final class ToastWindowController {
 }
 
 public final class CustomColorPanelBridge: NSObject {
+    public enum ColorPanelTarget: Equatable, Sendable {
+        case stroke
+        case blurTint
+    }
+
     public static let shared = CustomColorPanelBridge()
+    public private(set) var activeTarget: ColorPanelTarget = .stroke
     private weak var activeSettings: AppSettings?
     private var isUpdatingPanelColor = false
 
     public func present(for settings: AppSettings) {
+        presentPanel(for: settings, target: .stroke)
+    }
+
+    public func presentForBlurTint(for settings: AppSettings) {
+        presentPanel(for: settings, target: .blurTint)
+    }
+
+    private func presentPanel(for settings: AppSettings, target: ColorPanelTarget) {
         activeSettings = settings
+        activeTarget = target
         let panel = NSColorPanel.shared
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 3)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.showsAlpha = false
         panel.isContinuous = true
         isUpdatingPanelColor = true
-        panel.color = settings.activeStrokeColor.nsColor
+        switch target {
+        case .stroke:
+            panel.color = settings.activeStrokeColor.nsColor
+        case .blurTint:
+            panel.color = settings.blurCustomColor.nsColor
+        }
         isUpdatingPanelColor = false
         panel.setTarget(self)
         panel.setAction(#selector(colorPanelDidChange(_:)))
@@ -249,7 +269,13 @@ public final class CustomColorPanelBridge: NSObject {
 
     @objc private func colorPanelDidChange(_ sender: NSColorPanel) {
         guard !isUpdatingPanelColor, let settings = activeSettings else { return }
-        settings.setCustomStrokeColor(RGBColor(nsColor: sender.color))
+        let chosenColor = RGBColor(nsColor: sender.color)
+        switch activeTarget {
+        case .stroke:
+            settings.setCustomStrokeColor(chosenColor)
+        case .blurTint:
+            settings.setCustomBlurTintColor(chosenColor)
+        }
     }
 }
 
@@ -333,6 +359,11 @@ public struct AnnotateControlsView: View {
             ForEach(Array(settings.favColors.prefix(5).enumerated()), id: \.offset) { index, color in
                 Button {
                     settings.selectFavoriteColor(index: index)
+                    let shouldSyncBlurTint = settings.currentDrawMode == .blur && settings.blurUseCustomColor
+                    if shouldSyncBlurTint {
+                        settings.blurCustomColor = color
+                        canvasState?.updateSelectedBlurTintColor(settings.activeBlurTintColor)
+                    }
                 } label: {
                     Circle()
                         .fill(color.swiftUIColor)
@@ -430,33 +461,101 @@ public struct AnnotateControlsView: View {
         }
     }
 
+    @ViewBuilder
     private var lineWeightSection: some View {
-        HStack(spacing: 4) {
-            Button {
-                settings.decreaseLineWeight()
-            } label: {
-                Image(systemName: "minus.circle")
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .contentShape(Rectangle())
-            .help("Decrease Line Weight ([)")
+        if settings.currentDrawMode == .blur {
+            HStack(spacing: 4) {
+                Button {
+                    settings.decreaseBlurOpacity()
+                    canvasState?.updateSelectedBlurOpacity(settings.blurOpacity)
+                } label: {
+                    Image(systemName: "minus.circle")
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .help("Decrease Blur Opacity ([)")
 
-            Text("\(Int(settings.lineWeight))pt")
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .frame(width: 34)
+                Text("\(Int((settings.blurOpacity * 100.0).rounded()))%")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .frame(width: 38)
 
-            Button {
-                settings.increaseLineWeight()
-            } label: {
-                Image(systemName: "plus.circle")
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
+                Button {
+                    settings.increaseBlurOpacity()
+                    canvasState?.updateSelectedBlurOpacity(settings.blurOpacity)
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .help("Increase Blur Opacity (])")
+
+                toolbarToggle(
+                    icon: settings.blurStyle == .gaussian ? "aqi.medium" : "squareshape.split.3x3",
+                    isActive: settings.blurStyle == .pixelate,
+                    tooltip: "Blur Style: \(settings.blurStyle.title) (⌥ to invert)"
+                ) {
+                    settings.blurStyle = settings.blurStyle == .gaussian ? .pixelate : .gaussian
+                    canvasState?.updateSelectedBlurStyle(settings.blurStyle)
+                }
+
+                toolbarToggle(
+                    icon: settings.blurUseCustomColor ? "drop.fill" : "drop",
+                    isActive: settings.blurUseCustomColor,
+                    tooltip: "Optional Blur Tint Color"
+                ) {
+                    settings.blurUseCustomColor.toggle()
+                    canvasState?.updateSelectedBlurTintColor(settings.activeBlurTintColor)
+                }
+
+                if settings.blurUseCustomColor {
+                    Button {
+                        CustomColorPanelBridge.shared.presentForBlurTint(for: settings)
+                    } label: {
+                        Circle()
+                            .fill(settings.blurCustomColor.swiftUIColor)
+                            .frame(width: 22, height: 22)
+                            .overlay(
+                                Circle().strokeBorder(Color.white, lineWidth: 1.5)
+                            )
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .contentShape(Circle())
+                    .help("Choose Any Blur Tint Color...")
+                }
             }
-            .buttonStyle(.plain)
-            .contentShape(Rectangle())
-            .help("Increase Line Weight (])")
+        } else {
+            HStack(spacing: 4) {
+                Button {
+                    settings.decreaseLineWeight()
+                } label: {
+                    Image(systemName: "minus.circle")
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .help("Decrease Line Weight ([)")
+
+                Text("\(Int(settings.lineWeight))pt")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .frame(width: 34)
+
+                Button {
+                    settings.increaseLineWeight()
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .help("Increase Line Weight (])")
+            }
         }
     }
 
