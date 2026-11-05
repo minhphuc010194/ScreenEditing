@@ -23,6 +23,11 @@ public final class AnnotatePanel: NSPanel {
     override public var canBecomeKey: Bool { true }
     override public var canBecomeMain: Bool { false }
 
+    override public func resignKey() {
+        super.resignKey()
+        (contentView as? AnnotateCanvasView)?.cancelActiveInteraction()
+    }
+
     override public func performKeyEquivalent(with event: NSEvent) -> Bool {
         if let canvas = contentView as? AnnotateCanvasView,
            canvas.handleKeyCommand(keyCode: event.keyCode, modifiers: event.modifierFlags.rawValue) {
@@ -211,6 +216,11 @@ public final class BackdropBlurRegionView: NSView {
 public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     private static let blurCIContext = CIContext(options: [.cacheIntermediates: false])
 
+    private enum ActiveTextTransform {
+        case cornerScale(id: UUID, center: CGPoint, initialDistance: Double, initialFontSize: Double)
+        case rotate(id: UUID, center: CGPoint, initialAngle: Double, initialRotation: Double)
+    }
+
     public let canvasState: AnnotationCanvasState
     public let settings: AppSettings
     public let shortcutManager: ShortcutManager
@@ -220,6 +230,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     public var onRequestOpenSettings: (() -> Void)?
     public var onLineWeightChanged: ((Double) -> Void)?
     public var onBlurOpacityChanged: ((Double) -> Void)?
+    public var onTextSizeChanged: ((Double) -> Void)?
     public var exclusionScreenRectsProvider: (() -> [NSRect])?
     public var regionCaptureProvider: ((CGRect) -> CGImage?)? {
         didSet {
@@ -236,6 +247,14 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     public private(set) var editingAnnotationID: UUID?
     public private(set) var backdropBlurViews: [UUID: BackdropBlurRegionView] = [:]
 
+    private var editingInitialTextColor: RGBColor?
+    private var editingInitialNSColor: NSColor?
+    private var editingOverrideColor: RGBColor?
+    private var editingInitialFontName: String?
+    private var editingInitialFontSize: Double?
+    private var editingOverrideFontSize: Double?
+    private var activeTextTransform: ActiveTextTransform?
+    private var isTrackpadGestureTransforming = false
     private var isDraggingSelection = false
     private var isMarqueeSelecting = false
     private var dragOriginPoint: CGPoint = .zero
@@ -275,6 +294,98 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 self?.needsDisplay = true
             }
             .store(in: &cancellables)
+
+        settings.$selectedColorIndex
+            .combineLatest(settings.$favColors, settings.$useRandomColors)
+            .dropFirst()
+            .sink { [weak self] selectedIndex, favColors, useRandom in
+                guard let self, let field = self.activeTextField else { return }
+                let nextColor: RGBColor
+                if useRandom {
+                    nextColor = GradientGenerator.randomVividColor()
+                } else if favColors.isEmpty {
+                    nextColor = .red
+                } else {
+                    let safeIndex = min(max(selectedIndex, 0), favColors.count - 1)
+                    nextColor = favColors[safeIndex]
+                }
+                self.editingOverrideColor = nextColor
+                field.textColor = nextColor.nsColor
+                self.needsDisplay = true
+            }
+            .store(in: &cancellables)
+
+        canvasState.$annotations
+            .dropFirst()
+            .sink { [weak self] updatedItems in
+                guard let self, let field = self.activeTextField else { return }
+                guard let editID = self.editingAnnotationID else { return }
+                guard let updatedItem = updatedItems.first(where: { $0.id == editID }) else { return }
+                let safeSize = AnnotationItem.sanitizeFontSize(updatedItem.fontSize)
+                self.editingOverrideFontSize = safeSize
+                field.font = NSFont(name: updatedItem.fontName, size: CGFloat(safeSize))
+                    ?? NSFont.systemFont(ofSize: CGFloat(safeSize), weight: .semibold)
+                let desiredHeight = CGFloat(safeSize * 1.45)
+                let clampedHeight = desiredHeight.isFinite ? min(max(36.0, desiredHeight), 400.0) : 36.0
+                let itemOrigin = updatedItem.startPoint
+                let hasFiniteItemOrigin = itemOrigin.x.isFinite && itemOrigin.y.isFinite
+                let resolvedOrigin = hasFiniteItemOrigin ? itemOrigin : field.frame.origin
+                let hasSafeOrigin = resolvedOrigin.x.isFinite && resolvedOrigin.y.isFinite
+                if hasSafeOrigin && field.frame.width.isFinite {
+                    field.frame = NSRect(
+                        x: resolvedOrigin.x,
+                        y: resolvedOrigin.y,
+                        width: field.frame.width,
+                        height: clampedHeight
+                    )
+                }
+                self.needsDisplay = true
+            }
+            .store(in: &cancellables)
+
+        settings.$annotateFontSize
+            .dropFirst()
+            .sink { [weak self] nextFontSize in
+                guard let self, let field = self.activeTextField else { return }
+                guard self.editingAnnotationID == nil else { return }
+                let safeSize = AnnotationItem.sanitizeFontSize(nextFontSize)
+                self.editingOverrideFontSize = safeSize
+                let fontName = self.editingInitialFontName ?? self.settings.annotateFont.fontName
+                field.font = NSFont(name: fontName, size: CGFloat(safeSize))
+                    ?? NSFont.systemFont(ofSize: CGFloat(safeSize), weight: .semibold)
+                let desiredHeight = CGFloat(safeSize * 1.45)
+                let clampedHeight = desiredHeight.isFinite ? min(max(36.0, desiredHeight), 400.0) : 36.0
+                let hasFiniteFieldOrigin = field.frame.origin.x.isFinite && field.frame.origin.y.isFinite
+                if hasFiniteFieldOrigin {
+                    field.frame.size.height = clampedHeight
+                }
+                self.needsDisplay = true
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+            .sink { [weak self] _ in
+                self?.cancelActiveInteraction()
+            }
+            .store(in: &cancellables)
+    }
+
+    private var hasActiveMouseInteraction: Bool {
+        let hasOrphanedDrag = activeTextTransform != nil || isDraggingSelection
+        return hasOrphanedDrag || isMarqueeSelecting
+    }
+
+    public func cancelActiveInteraction() {
+        activeTextTransform = nil
+        isTrackpadGestureTransforming = false
+        isDraggingSelection = false
+        isMarqueeSelecting = false
+        activeTouchIdentity = nil
+        canvasState.selectionRectangle = nil
+        canvasState.activeDraft = nil
+        canvasState.endInteractiveTransform()
+        syncBackdropBlurViews()
+        needsDisplay = true
     }
 
     public func clearBlurCache() {
@@ -491,6 +602,11 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         return super.hitTest(point)
     }
 
+    override public func viewWillMove(toWindow newWindow: NSWindow?) {
+        cancelActiveInteraction()
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override public func updateTrackingAreas() {
         super.updateTrackingAreas()
         for area in trackingAreas {
@@ -506,6 +622,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     override public func mouseMoved(with event: NSEvent) {
+        if hasActiveMouseInteraction {
+            cancelActiveInteraction()
+        }
         cursorLocation = convert(event.locationInWindow, from: nil)
         needsDisplay = true
     }
@@ -515,10 +634,59 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
+    override public func rightMouseDown(with event: NSEvent) {
+        cancelActiveInteraction()
+        super.rightMouseDown(with: event)
+    }
+
+    override public func otherMouseDown(with event: NSEvent) {
+        cancelActiveInteraction()
+        super.otherMouseDown(with: event)
+    }
+
+    private func hitTestSelectedTextTransformHandle(at point: CGPoint) -> ActiveTextTransform? {
+        guard canvasState.selectedIDs.count == 1 else { return nil }
+        guard let selectedID = canvasState.selectedIDs.first else { return nil }
+        guard let item = canvasState.annotations.first(where: { $0.id == selectedID }) else { return nil }
+        guard item.mode == .text else { return nil }
+
+        let localPoint = item.toTextLocalSpace(point)
+        let handleHitRadius: CGFloat = 8.0
+        let rotationHandle = item.localTextRotationHandleCenter
+        let distToRotation = hypot(localPoint.x - rotationHandle.x, localPoint.y - rotationHandle.y)
+        if distToRotation <= handleHitRadius {
+            let center = item.textCenter
+            let initialAngle = atan2(Double(point.y - center.y), Double(point.x - center.x))
+            return .rotate(
+                id: item.id,
+                center: center,
+                initialAngle: initialAngle,
+                initialRotation: item.effectiveRotationRadians
+            )
+        }
+
+        for corner in item.localTextScaleHandleCenters {
+            let distToCorner = hypot(localPoint.x - corner.x, localPoint.y - corner.y)
+            if distToCorner <= handleHitRadius {
+                let center = item.textCenter
+                let rawDist = hypot(Double(point.x - center.x), Double(point.y - center.y))
+                let safeSize = item.fontSize.isFinite ? min(max(item.fontSize, 8.0), 200.0) : 24.0
+                return .cornerScale(
+                    id: item.id,
+                    center: center,
+                    initialDistance: max(rawDist, 8.0),
+                    initialFontSize: safeSize
+                )
+            }
+        }
+        return nil
+    }
+
     override public func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         cursorLocation = point
         commitActiveTextEditing()
+        cancelActiveInteraction()
 
         let flags = event.modifierFlags
         let isCommandDown = flags.contains(.command)
@@ -533,7 +701,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 if !canvasState.selectedIDs.contains(hitID) {
                     canvasState.toggleSelection(at: point, additive: isShiftDown)
                 }
-                isDraggingSelection = true
+                if !canvasState.selectedIDs.isEmpty {
+                    isDraggingSelection = true
+                    canvasState.beginInteractiveTransform()
+                } else {
+                    isDraggingSelection = false
+                }
                 isMarqueeSelecting = false
             } else {
                 if !isShiftDown {
@@ -548,7 +721,44 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             return
         }
 
+        if let transform = hitTestSelectedTextTransformHandle(at: point) {
+            activeTextTransform = transform
+            isDraggingSelection = false
+            isMarqueeSelecting = false
+            canvasState.beginInteractiveTransform()
+            needsDisplay = true
+            return
+        }
+
+        if let hitID = canvasState.hitTestAnnotation(at: point),
+           let hitItem = canvasState.annotations.first(where: { $0.id == hitID }) {
+            let isAlreadySelected = canvasState.selectedIDs.contains(hitID)
+            let isTextItem = hitItem.mode == .text
+            let isTextMode = settings.currentDrawMode == .text
+            let isTextHitInTextMode = isTextMode && isTextItem
+            if isAlreadySelected || isTextHitInTextMode {
+                let isDoubleClick = event.clickCount >= 2
+                if isDoubleClick && isTextItem {
+                    canvasState.selectedIDs = [hitItem.id]
+                    beginInlineTextEditing(at: hitItem.startPoint, existingID: hitItem.id)
+                    return
+                }
+                if !isAlreadySelected {
+                    canvasState.selectedIDs = [hitItem.id]
+                }
+                dragOriginPoint = point
+                lastDragPoint = point
+                isDraggingSelection = true
+                isMarqueeSelecting = false
+                canvasState.beginInteractiveTransform()
+                syncBackdropBlurViews()
+                needsDisplay = true
+                return
+            }
+        }
+
         if settings.currentDrawMode == .text {
+            canvasState.selectedIDs.removeAll()
             beginInlineTextEditing(at: point)
             return
         }
@@ -575,7 +785,36 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     override public func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         cursorLocation = point
+        guard activeTextField == nil else { return }
         let flags = event.modifierFlags
+
+        if let transform = activeTextTransform {
+            let hasFiniteDragPoint = point.x.isFinite && point.y.isFinite
+            if hasFiniteDragPoint {
+                switch transform {
+                case let .cornerScale(id, center, initialDistance, initialFontSize):
+                    let hasFiniteCenter = center.x.isFinite && center.y.isFinite
+                    guard hasFiniteCenter else { break }
+                    let currentDistance = hypot(Double(point.x - center.x), Double(point.y - center.y))
+                    let rawSize = initialFontSize * (currentDistance / max(initialDistance, 8.0))
+                    let clampedSize = rawSize.isFinite ? min(max(rawSize, 8.0), 200.0) : initialFontSize
+                    canvasState.scaleTextAnnotation(id, toFontSize: clampedSize)
+                case let .rotate(id, center, initialAngle, initialRotation):
+                    let hasFiniteCenter = center.x.isFinite && center.y.isFinite
+                    guard hasFiniteCenter else { break }
+                    let currentAngle = atan2(Double(point.y - center.y), Double(point.x - center.x))
+                    let baseRotation = AnnotationCanvasState.sanitizeRotationRadians(initialRotation)
+                    var nextRotation = baseRotation + (currentAngle - initialAngle)
+                    if flags.contains(.shift) {
+                        let snapIncrement = Double.pi / 12.0
+                        nextRotation = (nextRotation / snapIncrement).rounded() * snapIncrement
+                    }
+                    canvasState.setTextRotation(AnnotationCanvasState.sanitizeRotationRadians(nextRotation), for: id)
+                }
+            }
+            needsDisplay = true
+            return
+        }
 
         if isDraggingSelection {
             let delta = CGSize(width: point.x - lastDragPoint.x, height: point.y - lastDragPoint.y)
@@ -631,14 +870,24 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let point = convert(event.locationInWindow, from: nil)
         cursorLocation = point
 
+        if activeTextTransform != nil {
+            activeTextTransform = nil
+            canvasState.endInteractiveTransform()
+            needsDisplay = true
+            return
+        }
+
         if isDraggingSelection || isMarqueeSelecting {
             isDraggingSelection = false
             isMarqueeSelecting = false
+            canvasState.endInteractiveTransform()
             canvasState.selectionRectangle = nil
             syncBackdropBlurViews()
             needsDisplay = true
             return
         }
+
+        guard activeTextField == nil else { return }
 
         canvasState.updateStroke(
             to: point,
@@ -647,6 +896,58 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         )
         canvasState.finishStroke()
         syncBackdropBlurViews()
+        needsDisplay = true
+    }
+
+    private func beginTrackpadTransformIfNeeded(for phase: NSEvent.Phase) {
+        if phase.isEmpty {
+            if isTrackpadGestureTransforming {
+                isTrackpadGestureTransforming = false
+                canvasState.endInteractiveTransform()
+            }
+            return
+        }
+        if phase.contains(.began) {
+            isTrackpadGestureTransforming = true
+            canvasState.beginInteractiveTransform()
+        } else if phase.contains(.changed) && !isTrackpadGestureTransforming {
+            isTrackpadGestureTransforming = true
+            canvasState.beginInteractiveTransform()
+        }
+    }
+
+    private func endTrackpadTransformIfNeeded(for phase: NSEvent.Phase) {
+        let isFinished = phase.contains(.ended) || phase.contains(.cancelled)
+        if isFinished {
+            isTrackpadGestureTransforming = false
+            canvasState.endInteractiveTransform()
+        }
+    }
+
+    override public func magnify(with event: NSEvent) {
+        let canTransformText = activeTextField == nil && canvasState.hasSelectedTextAnnotations
+        guard canTransformText else {
+            super.magnify(with: event)
+            return
+        }
+        beginTrackpadTransformIfNeeded(for: event.phase)
+        let rawScale = 1.0 + Double(event.magnification)
+        let safeScale = rawScale.isFinite ? max(0.1, rawScale) : 1.0
+        canvasState.scaleSelectedTextAnnotations(by: safeScale)
+        endTrackpadTransformIfNeeded(for: event.phase)
+        needsDisplay = true
+    }
+
+    override public func rotate(with event: NSEvent) {
+        let canTransformText = activeTextField == nil && canvasState.hasSelectedTextAnnotations
+        guard canTransformText else {
+            super.rotate(with: event)
+            return
+        }
+        beginTrackpadTransformIfNeeded(for: event.phase)
+        let deltaRadians = Double(event.rotation) * .pi / 180.0
+        canvasState.rotateSelectedTextAnnotations(by: deltaRadians)
+        endTrackpadTransformIfNeeded(for: event.phase)
         needsDisplay = true
     }
 
@@ -720,17 +1021,44 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
-    private var shouldAdjustBlurOpacityForWeightShortcut: Bool {
-        if settings.currentDrawMode == .blur {
-            return true
-        }
+    private var shouldAdjustTextSizeForWeightShortcut: Bool {
         let selectedItems = canvasState.annotations.filter { canvasState.selectedIDs.contains($0.id) }
-        let hasSelectedItems = !selectedItems.isEmpty
-        return hasSelectedItems && selectedItems.allSatisfy { $0.mode == .blur }
+        if !selectedItems.isEmpty {
+            return selectedItems.allSatisfy { $0.mode == .text }
+        }
+        return settings.currentDrawMode == .text
+    }
+
+    private var shouldAdjustBlurOpacityForWeightShortcut: Bool {
+        let selectedItems = canvasState.annotations.filter { canvasState.selectedIDs.contains($0.id) }
+        if !selectedItems.isEmpty {
+            return selectedItems.allSatisfy { $0.mode == .blur }
+        }
+        return settings.currentDrawMode == .blur
+    }
+
+    private func adjustTextFontSize(by step: Double) {
+        let safeStep = step.isFinite ? step : 0.0
+        if let updatedSize = canvasState.adjustSelectedTextFontSize(by: safeStep) {
+            let safeUpdated = AnnotationItem.sanitizeFontSize(updatedSize)
+            settings.annotateFontSize = min(max(safeUpdated, 10.0), 96.0)
+            onTextSizeChanged?(safeUpdated)
+        } else {
+            let currentSize = settings.annotateFontSize
+            let safeBase = currentSize.isFinite ? currentSize : 24.0
+            let nextSize = min(max(safeBase + safeStep, 10.0), 96.0)
+            settings.annotateFontSize = nextSize
+            onTextSizeChanged?(nextSize)
+        }
     }
 
     @discardableResult
     public func handleKeyCommand(keyCode: UInt16, modifiers: UInt) -> Bool {
+        let isPrimaryMouseReleased = (NSEvent.pressedMouseButtons & 1) == 0
+        if isPrimaryMouseReleased && hasActiveMouseInteraction {
+            cancelActiveInteraction()
+        }
+
         if keyCode == 0x35 {
             if activeTextField != nil {
                 cancelActiveTextEditing()
@@ -810,7 +1138,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         case .blur: settings.selectOrToggleDrawMode(.blur)
         case .clearAnnotate: canvasState.deleteSelectedOrClearAll()
         case .decreaseLineWeight:
-            if shouldAdjustBlurOpacityForWeightShortcut {
+            if shouldAdjustTextSizeForWeightShortcut {
+                adjustTextFontSize(by: -2.0)
+            } else if shouldAdjustBlurOpacityForWeightShortcut {
                 settings.decreaseBlurOpacity()
                 canvasState.updateSelectedBlurOpacity(settings.blurOpacity)
                 clearBlurCache()
@@ -820,7 +1150,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 onLineWeightChanged?(settings.lineWeight)
             }
         case .increaseLineWeight:
-            if shouldAdjustBlurOpacityForWeightShortcut {
+            if shouldAdjustTextSizeForWeightShortcut {
+                adjustTextFontSize(by: 2.0)
+            } else if shouldAdjustBlurOpacityForWeightShortcut {
                 settings.increaseBlurOpacity()
                 canvasState.updateSelectedBlurOpacity(settings.blurOpacity)
                 clearBlurCache()
@@ -860,17 +1192,63 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     public func beginInlineTextEditing(at point: CGPoint, existingID: UUID? = nil) {
+        let hasFinitePoint = point.x.isFinite && point.y.isFinite
+        guard hasFinitePoint else { return }
         commitActiveTextEditing()
-        editingAnnotationID = existingID
+        let existingItem: AnnotationItem?
+        if let existingID {
+            existingItem = canvasState.annotations.first { item in
+                let matchesID = item.id == existingID
+                return matchesID && item.mode == .text
+            }
+        } else {
+            existingItem = nil
+        }
 
-        let field = NSTextField(frame: NSRect(x: point.x, y: point.y, width: 260, height: max(36, CGFloat(settings.annotateFontSize * 1.45))))
+        let candidateOrigin = existingItem?.startPoint ?? point
+        let hasFiniteCandidateOrigin = candidateOrigin.x.isFinite && candidateOrigin.y.isFinite
+        let resolvedOrigin = hasFiniteCandidateOrigin ? candidateOrigin : point
+        let hasFiniteResolvedOrigin = resolvedOrigin.x.isFinite && resolvedOrigin.y.isFinite
+        guard hasFiniteResolvedOrigin else { return }
+
+        editingAnnotationID = existingID
+        let resolvedColor = existingItem?.strokeColor ?? settings.activeStrokeColor
+        let resolvedFontName = existingItem?.fontName ?? settings.annotateFont.fontName
+        let rawFontSize = existingItem?.fontSize ?? settings.annotateFontSize
+        let resolvedFontSize = AnnotationItem.sanitizeFontSize(rawFontSize)
+        let initialNSColor = resolvedColor.nsColor
+
+        editingInitialTextColor = resolvedColor
+        editingInitialNSColor = initialNSColor
+        editingOverrideColor = nil
+        editingInitialFontName = resolvedFontName
+        editingInitialFontSize = resolvedFontSize
+        editingOverrideFontSize = nil
+
+        let rawDesiredWidth = existingItem.map { $0.textLayoutRect.width + 32.0 } ?? 260.0
+        let desiredWidth = rawDesiredWidth.isFinite ? rawDesiredWidth : 260.0
+        let hasValidBoundsWidth = bounds.width.isFinite && bounds.width > 260.0
+        let maxCanvasWidth = hasValidBoundsWidth ? min(bounds.width, 1200.0) : 1200.0
+        let fieldWidth = min(max(260.0, desiredWidth), maxCanvasWidth)
+        let rawDesiredHeight = CGFloat(resolvedFontSize * 1.45)
+        let desiredHeight = rawDesiredHeight.isFinite ? rawDesiredHeight : 36.0
+        let fieldHeight = min(max(36.0, desiredHeight), 400.0)
+        let hasValidFieldSize = fieldWidth.isFinite && fieldHeight.isFinite
+        guard hasValidFieldSize else {
+            clearEditingMetadata()
+            return
+        }
+        let field = NSTextField(frame: NSRect(x: resolvedOrigin.x, y: resolvedOrigin.y, width: fieldWidth, height: fieldHeight))
         field.isBordered = true
         field.isBezeled = true
         field.drawsBackground = true
         field.backgroundColor = NSColor.black.withAlphaComponent(0.45)
-        field.textColor = settings.activeStrokeColor.nsColor
-        field.font = NSFont(name: settings.annotateFont.fontName, size: CGFloat(settings.annotateFontSize))
-            ?? NSFont.systemFont(ofSize: CGFloat(settings.annotateFontSize), weight: .semibold)
+        field.textColor = initialNSColor
+        field.font = NSFont(name: resolvedFontName, size: CGFloat(resolvedFontSize))
+            ?? NSFont.systemFont(ofSize: CGFloat(resolvedFontSize), weight: .semibold)
+        if let existingItem {
+            field.stringValue = AnnotationItem.clampText(existingItem.text)
+        }
         if settings.annotateTextPlaceholder {
             field.placeholderString = "Type something..."
         }
@@ -880,24 +1258,73 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         addSubview(field)
         window?.makeFirstResponder(field)
         activeTextField = field
+        needsDisplay = true
     }
 
     public func commitActiveTextEditing() {
         guard let field = activeTextField else { return }
-        let value = field.stringValue
+        let value = AnnotationItem.clampText(field.stringValue)
         let origin = field.frame.origin
         let editID = editingAnnotationID
+        let resolvedColor: RGBColor
+        if let currentNSColor = field.textColor {
+            let matchesInitialColor = currentNSColor == editingInitialNSColor
+            if let overrideColor = editingOverrideColor, currentNSColor == overrideColor.nsColor {
+                resolvedColor = overrideColor
+            } else if matchesInitialColor, let initialColor = editingInitialTextColor {
+                resolvedColor = initialColor
+            } else {
+                resolvedColor = RGBColor(nsColor: currentNSColor)
+            }
+        } else {
+            resolvedColor = editingOverrideColor ?? editingInitialTextColor ?? settings.activeStrokeColor
+        }
+        let resolvedFontName = editingInitialFontName ?? settings.annotateFont.fontName
+        let liveEditedItem = editID.flatMap { targetID in
+            canvasState.annotations.first { $0.id == targetID }
+        }
+        let rawResolvedFontSize: Double
+        if let liveItem = liveEditedItem {
+            let liveSize = AnnotationItem.sanitizeFontSize(liveItem.fontSize)
+            let initialSize = AnnotationItem.sanitizeFontSize(editingInitialFontSize ?? liveSize)
+            let wasLiveModified = abs(liveSize - initialSize) > 1e-6
+            if wasLiveModified {
+                rawResolvedFontSize = liveSize
+            } else if let overrideSize = editingOverrideFontSize {
+                rawResolvedFontSize = overrideSize
+            } else if let fieldFont = field.font {
+                let fieldSize = AnnotationItem.sanitizeFontSize(Double(fieldFont.pointSize))
+                let matchesInitial = abs(fieldSize - initialSize) < 1e-6
+                rawResolvedFontSize = matchesInitial ? initialSize : fieldSize
+            } else {
+                rawResolvedFontSize = initialSize
+            }
+        } else if let overrideSize = editingOverrideFontSize {
+            rawResolvedFontSize = overrideSize
+        } else if let fieldFont = field.font {
+            let fieldSize = AnnotationItem.sanitizeFontSize(Double(fieldFont.pointSize))
+            if let rawInitial = editingInitialFontSize {
+                let initialSize = AnnotationItem.sanitizeFontSize(rawInitial)
+                rawResolvedFontSize = abs(fieldSize - initialSize) < 1e-6 ? initialSize : fieldSize
+            } else {
+                rawResolvedFontSize = fieldSize
+            }
+        } else {
+            rawResolvedFontSize = editingInitialFontSize ?? settings.annotateFontSize
+        }
+        let resolvedFontSize = AnnotationItem.sanitizeFontSize(rawResolvedFontSize)
+
+        clearEditingMetadata()
         field.removeFromSuperview()
         activeTextField = nil
-        editingAnnotationID = nil
 
         canvasState.addOrUpdateTextAnnotation(
             id: editID,
             at: origin,
             text: value,
-            color: settings.activeStrokeColor,
-            fontName: settings.annotateFont.fontName,
-            fontSize: settings.annotateFontSize,
+            color: resolvedColor,
+            fontName: resolvedFontName,
+            fontSize: resolvedFontSize,
             isAutoErase: settings.autoEraseEnabled
         )
         window?.makeFirstResponder(self)
@@ -905,15 +1332,36 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     public func cancelActiveTextEditing() {
+        clearEditingMetadata()
         activeTextField?.removeFromSuperview()
         activeTextField = nil
-        editingAnnotationID = nil
         window?.makeFirstResponder(self)
         needsDisplay = true
     }
 
+    private func clearEditingMetadata() {
+        editingAnnotationID = nil
+        editingInitialTextColor = nil
+        editingInitialNSColor = nil
+        editingOverrideColor = nil
+        editingInitialFontName = nil
+        editingInitialFontSize = nil
+        editingOverrideFontSize = nil
+    }
+
     @objc private func textFieldCommitted(_ sender: NSTextField) {
         commitActiveTextEditing()
+    }
+
+    public func controlTextDidChange(_ obj: Notification) {
+        let targetField = (obj.object as? NSTextField) ?? activeTextField
+        guard let field = targetField else { return }
+        if let editor = field.currentEditor(), editor.string.count > AnnotationItem.maxTextLength {
+            editor.string = AnnotationItem.clampText(editor.string)
+        }
+        if field.stringValue.count > AnnotationItem.maxTextLength {
+            field.stringValue = AnnotationItem.clampText(field.stringValue)
+        }
     }
 
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -951,8 +1399,8 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
         if let marquee = canvasState.selectionRectangle {
             context.saveGState()
-            context.setFillColor(NSColor.systemBlue.withAlphaComponent(0.14).cgColor)
-            context.setStrokeColor(NSColor.systemBlue.withAlphaComponent(0.75).cgColor)
+            context.setFillColor(NSColor(SettingsView.themeLightBlue).withAlphaComponent(0.14).cgColor)
+            context.setStrokeColor(NSColor(SettingsView.themeBlue).withAlphaComponent(0.80).cgColor)
             context.setLineWidth(1.5)
             context.fill(marquee)
             context.stroke(marquee)
@@ -962,6 +1410,65 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         if settings.annotateToolIndicator, let cursor = cursorLocation {
             drawToolIndicator(at: cursor, in: context)
         }
+    }
+
+    private func drawSelectedTextChrome(for item: AnnotationItem, in context: CGContext) {
+        let selectionBox = item.textSelectionBox
+        let hasFiniteOrigin = selectionBox.origin.x.isFinite && selectionBox.origin.y.isFinite
+        let hasFiniteSize = selectionBox.size.width.isFinite && selectionBox.size.height.isFinite
+        guard hasFiniteOrigin && hasFiniteSize else { return }
+
+        let lightBlueCG = NSColor(SettingsView.themeLightBlue).cgColor
+        let primaryBlueCG = NSColor(SettingsView.themeBlue).cgColor
+        let whiteCG = NSColor.white.cgColor
+
+        context.saveGState()
+        context.setStrokeColor(lightBlueCG)
+        context.setLineWidth(1.5)
+        context.setLineDash(phase: 0, lengths: [4, 3])
+        context.stroke(selectionBox)
+
+        let shouldShowTransformHandles = canvasState.selectedIDs.count == 1
+        guard shouldShowTransformHandles else {
+            context.restoreGState()
+            return
+        }
+
+        let rotationCenter = item.localTextRotationHandleCenter
+        let rotationRadius: CGFloat = 5.0
+        context.setLineDash(phase: 0, lengths: [])
+        context.beginPath()
+        context.move(to: CGPoint(x: selectionBox.midX, y: selectionBox.maxY))
+        context.addLine(to: CGPoint(x: rotationCenter.x, y: rotationCenter.y - rotationRadius))
+        context.strokePath()
+
+        let cornerRadius: CGFloat = 4.5
+        for corner in item.localTextScaleHandleCenters {
+            let handleRect = CGRect(
+                x: corner.x - cornerRadius,
+                y: corner.y - cornerRadius,
+                width: cornerRadius * 2.0,
+                height: cornerRadius * 2.0
+            )
+            context.setFillColor(whiteCG)
+            context.fillEllipse(in: handleRect)
+            context.setStrokeColor(primaryBlueCG)
+            context.setLineWidth(1.5)
+            context.strokeEllipse(in: handleRect)
+        }
+
+        let rotationHandleRect = CGRect(
+            x: rotationCenter.x - rotationRadius,
+            y: rotationCenter.y - rotationRadius,
+            width: rotationRadius * 2.0,
+            height: rotationRadius * 2.0
+        )
+        context.setFillColor(whiteCG)
+        context.fillEllipse(in: rotationHandleRect)
+        context.setStrokeColor(primaryBlueCG)
+        context.setLineWidth(1.5)
+        context.strokeEllipse(in: rotationHandleRect)
+        context.restoreGState()
     }
 
     private func drawAnnotation(_ item: AnnotationItem, in context: CGContext, isSelected: Bool) {
@@ -975,13 +1482,33 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
         switch item.mode {
         case .text:
-            let font = NSFont(name: item.fontName, size: CGFloat(item.fontSize))
-                ?? NSFont.systemFont(ofSize: CGFloat(item.fontSize), weight: .semibold)
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: color
-            ]
-            (item.text as NSString).draw(at: item.startPoint, withAttributes: attrs)
+            let hasActiveField = activeTextField != nil
+            let isEditingThisItem = hasActiveField && editingAnnotationID == item.id
+            let hasFiniteOrigin = item.startPoint.x.isFinite && item.startPoint.y.isFinite
+            if !isEditingThisItem && hasFiniteOrigin {
+                let safeFontSize = AnnotationItem.sanitizeFontSize(item.fontSize)
+                let font = NSFont(name: item.fontName, size: CGFloat(safeFontSize))
+                    ?? NSFont.systemFont(ofSize: CGFloat(safeFontSize), weight: .semibold)
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: color
+                ]
+                let center = item.textCenter
+                let angle = item.effectiveRotationRadians
+                let hasFiniteCenter = center.x.isFinite && center.y.isFinite
+                let boundedText = AnnotationItem.clampText(item.text)
+                context.saveGState()
+                if hasFiniteCenter && angle != 0.0 {
+                    context.translateBy(x: center.x, y: center.y)
+                    context.rotate(by: CGFloat(angle))
+                    context.translateBy(x: -center.x, y: -center.y)
+                }
+                (boundedText as NSString).draw(at: item.startPoint, withAttributes: attrs)
+                if isSelected {
+                    drawSelectedTextChrome(for: item, in: context)
+                }
+                context.restoreGState()
+            }
         case .arrow:
             if let gradient = item.gradientPair {
                 context.addPath(path)
@@ -1089,7 +1616,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             }
         }
 
-        if isSelected {
+        if isSelected && item.mode != .text {
             let rawBox = item.boundingRect
             let hasFiniteOrigin = rawBox.origin.x.isFinite && rawBox.origin.y.isFinite
             let hasFiniteSize = rawBox.size.width.isFinite && rawBox.size.height.isFinite
@@ -1097,7 +1624,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 let clippedBox = rawBox.intersection(bounds)
                 if !clippedBox.isNull {
                     let selectionBox = clippedBox.insetBy(dx: -4, dy: -4)
-                    context.setStrokeColor(NSColor.systemCyan.cgColor)
+                    context.setStrokeColor(NSColor(SettingsView.themeLightBlue).cgColor)
                     context.setLineWidth(1.5)
                     context.setLineDash(phase: 0, lengths: [4, 3])
                     context.stroke(selectionBox)
@@ -1187,9 +1714,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func drawToolIndicator(at cursor: CGPoint, in context: CGContext) {
+        let hasFiniteCursor = cursor.x.isFinite && cursor.y.isFinite
+        guard hasFiniteCursor else { return }
         context.saveGState()
         let badgeCenter = CGPoint(x: cursor.x + 14, y: cursor.y - 14)
-        let radius = max(4.0, min(12.0, CGFloat(settings.lineWeight * 0.5)))
+        let safeWeight = settings.lineWeight.isFinite ? settings.lineWeight : 6.0
+        let radius = max(4.0, min(12.0, CGFloat(safeWeight * 0.5)))
         let badgeRect = CGRect(
             x: badgeCenter.x - radius,
             y: badgeCenter.y - radius,
@@ -1293,12 +1823,21 @@ public final class AnnotateOverlayController {
             view.onRequestClose = { [weak self] in self?.hideAnnotation() }
             view.onRequestOpenSettings = { [weak self] in self?.onRequestOpenSettings?() }
             view.onLineWeightChanged = { [weak self] weight in
-                self?.toastController.showToast(.lineWeight, message: "Line Weight: \(Int(weight)) pt")
+                let safeWeight = weight.isFinite ? min(max(weight, 1.0), 64.0) : 6.0
+                self?.toastController.showToast(.lineWeight, message: "Line Weight: \(Int(safeWeight.rounded())) pt")
             }
             view.onBlurOpacityChanged = { [weak self] opacity in
+                let safeOpacity = opacity.isFinite ? min(max(opacity, 0.10), 1.00) : 0.55
                 self?.toastController.showToast(
                     .lineWeight,
-                    message: "Blur Opacity: \(Int((opacity * 100.0).rounded()))%"
+                    message: "Blur Opacity: \(Int((safeOpacity * 100.0).rounded()))%"
+                )
+            }
+            view.onTextSizeChanged = { [weak self] fontSize in
+                let safeSize = AnnotationItem.sanitizeFontSize(fontSize)
+                self?.toastController.showToast(
+                    .lineWeight,
+                    message: "Text Size: \(Int(safeSize.rounded())) pt"
                 )
             }
             view.exclusionScreenRectsProvider = { [weak self] in
@@ -1343,6 +1882,7 @@ public final class AnnotateOverlayController {
 
     public func hideAnnotation() {
         canvasView?.commitActiveTextEditing()
+        canvasView?.cancelActiveInteraction()
         if settings.annotateSaveSession, let data = canvasState.exportSessionData() {
             settings.defaults.set(data, forKey: Self.savedSessionKey)
         } else if !settings.annotateSaveSession {
@@ -1387,6 +1927,9 @@ public final class AnnotateOverlayController {
                 isHoldKeyActive = modifierFlags.contains(.capsLock)
             }
             panel.ignoresMouseEvents = !isHoldKeyActive
+        }
+        if panel.ignoresMouseEvents {
+            canvasView?.cancelActiveInteraction()
         }
         if panel.ignoresMouseEvents != previousIgnores {
             canvasView?.clearBlurCache()
@@ -1492,6 +2035,15 @@ public final class AnnotateOverlayController {
             }
             .store(in: &cancellables)
 
+        canvasState.$selectedIDs
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.settings.isAnnotating else { return }
+                self.updateAuxiliaryPanels()
+            }
+            .store(in: &cancellables)
+
         settings.$touchDrawEnabled
             .dropFirst()
             .receive(on: RunLoop.main)
@@ -1503,10 +2055,10 @@ public final class AnnotateOverlayController {
 
         settings.$selectedColorIndex
             .combineLatest(settings.$favColors, settings.$useRandomColors, settings.$enableGradients)
+            .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _, _, _ in
                 guard let self, self.settings.isAnnotating else { return }
-                self.canvasView?.activeTextField?.textColor = self.settings.activeStrokeColor.nsColor
                 self.canvasView?.needsDisplay = true
             }
             .store(in: &cancellables)
@@ -1535,7 +2087,14 @@ public final class AnnotateOverlayController {
                     onSaveScreenshot: { [weak self] in _ = self?.saveScreenshot() },
                     onClear: { [weak self] in self?.canvasState.clearAll() },
                     onToggleShortcuts: { [weak self] in self?.settings.isShowingShortcutsCheatsheet.toggle() },
-                    onClose: { [weak self] in self?.hideAnnotation() }
+                    onClose: { [weak self] in self?.hideAnnotation() },
+                    onTextSizeChanged: { [weak self] fontSize in
+                        let safeSize = AnnotationItem.sanitizeFontSize(fontSize)
+                        self?.toastController.showToast(
+                            .lineWeight,
+                            message: "Text Size: \(Int(safeSize.rounded())) pt"
+                        )
+                    }
                 )
                 let hosting = FirstMouseHostingView(rootView: toolbarView)
                 let fitting = hosting.fittingSize
