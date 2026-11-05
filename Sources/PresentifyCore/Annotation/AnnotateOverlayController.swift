@@ -216,9 +216,10 @@ public final class BackdropBlurRegionView: NSView {
 public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     private static let blurCIContext = CIContext(options: [.cacheIntermediates: false])
 
-    private enum ActiveTextTransform {
-        case cornerScale(id: UUID, center: CGPoint, initialDistance: Double, initialFontSize: Double)
-        case rotate(id: UUID, center: CGPoint, initialAngle: Double, initialRotation: Double)
+    private enum ActiveAnnotationTransform {
+        case textCornerScale(id: UUID, center: CGPoint, initialDistance: Double, initialFontSize: Double)
+        case textRotate(id: UUID, center: CGPoint, initialAngle: Double, initialRotation: Double)
+        case itemCornerScale(anchor: AnnotationCornerScaleAnchor, dragStartPoint: CGPoint)
     }
 
     public let canvasState: AnnotationCanvasState
@@ -246,6 +247,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     public private(set) var activeTextField: NSTextField?
     public private(set) var editingAnnotationID: UUID?
     public private(set) var backdropBlurViews: [UUID: BackdropBlurRegionView] = [:]
+    public private(set) var isPostDrawAutoSelection = false
 
     private var editingInitialTextColor: RGBColor?
     private var editingInitialNSColor: NSColor?
@@ -253,7 +255,8 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     private var editingInitialFontName: String?
     private var editingInitialFontSize: Double?
     private var editingOverrideFontSize: Double?
-    private var activeTextTransform: ActiveTextTransform?
+    private var activeAnnotationTransform: ActiveAnnotationTransform?
+    private var isApplyingPostDrawSelection = false
     private var isTrackpadGestureTransforming = false
     private var isDraggingSelection = false
     private var isMarqueeSelecting = false
@@ -287,6 +290,14 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             }
             .store(in: &cancellables)
 
+        canvasState.$selectedIDs
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self, !self.isApplyingPostDrawSelection else { return }
+                self.isPostDrawAutoSelection = false
+            }
+            .store(in: &cancellables)
+
         settings.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -296,13 +307,13 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             .store(in: &cancellables)
 
         settings.$selectedColorIndex
-            .combineLatest(settings.$favColors, settings.$useRandomColors)
+            .combineLatest(settings.$favColors, settings.$useRandomColors, settings.$activeGradient)
             .dropFirst()
-            .sink { [weak self] selectedIndex, favColors, useRandom in
+            .sink { [weak self] selectedIndex, favColors, useRandom, activeGradient in
                 guard let self, let field = self.activeTextField else { return }
                 let nextColor: RGBColor
                 if useRandom {
-                    nextColor = GradientGenerator.randomVividColor()
+                    nextColor = activeGradient.startColor
                 } else if favColors.isEmpty {
                     nextColor = .red
                 } else {
@@ -370,13 +381,20 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             .store(in: &cancellables)
     }
 
-    private var hasActiveMouseInteraction: Bool {
-        let hasOrphanedDrag = activeTextTransform != nil || isDraggingSelection
+    var hasActiveMouseInteraction: Bool {
+        let hasOrphanedDrag = activeAnnotationTransform != nil || isDraggingSelection
         return hasOrphanedDrag || isMarqueeSelecting
     }
 
+    private func selectPostDrawAnnotation(_ id: UUID) {
+        isApplyingPostDrawSelection = true
+        canvasState.selectedIDs = [id]
+        isApplyingPostDrawSelection = false
+        isPostDrawAutoSelection = true
+    }
+
     public func cancelActiveInteraction() {
-        activeTextTransform = nil
+        activeAnnotationTransform = nil
         isTrackpadGestureTransforming = false
         isDraggingSelection = false
         isMarqueeSelecting = false
@@ -644,39 +662,72 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         super.otherMouseDown(with: event)
     }
 
-    private func hitTestSelectedTextTransformHandle(at point: CGPoint) -> ActiveTextTransform? {
+    private func visibleNonTextSelectionBox(for item: AnnotationItem) -> CGRect? {
+        let rawBox = item.boundingRect
+        let hasFiniteOrigin = rawBox.origin.x.isFinite && rawBox.origin.y.isFinite
+        let hasFiniteSize = rawBox.size.width.isFinite && rawBox.size.height.isFinite
+        guard hasFiniteOrigin && hasFiniteSize else { return nil }
+        let clippedBox = rawBox.intersection(bounds)
+        guard !clippedBox.isNull else { return nil }
+        let selectionBox = clippedBox.insetBy(dx: -4.0, dy: -4.0)
+        let hasFiniteBoxOrigin = selectionBox.origin.x.isFinite && selectionBox.origin.y.isFinite
+        let hasFiniteBoxSize = selectionBox.size.width.isFinite && selectionBox.size.height.isFinite
+        guard hasFiniteBoxOrigin && hasFiniteBoxSize else { return nil }
+        return selectionBox
+    }
+
+    private func hitTestSelectedAnnotationTransformHandle(at point: CGPoint) -> ActiveAnnotationTransform? {
+        let hasFinitePoint = point.x.isFinite && point.y.isFinite
+        guard hasFinitePoint else { return nil }
         guard canvasState.selectedIDs.count == 1 else { return nil }
         guard let selectedID = canvasState.selectedIDs.first else { return nil }
         guard let item = canvasState.annotations.first(where: { $0.id == selectedID }) else { return nil }
-        guard item.mode == .text else { return nil }
 
-        let localPoint = item.toTextLocalSpace(point)
         let handleHitRadius: CGFloat = 8.0
-        let rotationHandle = item.localTextRotationHandleCenter
-        let distToRotation = hypot(localPoint.x - rotationHandle.x, localPoint.y - rotationHandle.y)
-        if distToRotation <= handleHitRadius {
-            let center = item.textCenter
-            let initialAngle = atan2(Double(point.y - center.y), Double(point.x - center.x))
-            return .rotate(
-                id: item.id,
-                center: center,
-                initialAngle: initialAngle,
-                initialRotation: item.effectiveRotationRadians
-            )
-        }
-
-        for corner in item.localTextScaleHandleCenters {
-            let distToCorner = hypot(localPoint.x - corner.x, localPoint.y - corner.y)
-            if distToCorner <= handleHitRadius {
+        if item.mode == .text {
+            let localPoint = item.toTextLocalSpace(point)
+            let rotationHandle = item.localTextRotationHandleCenter
+            let distToRotation = hypot(localPoint.x - rotationHandle.x, localPoint.y - rotationHandle.y)
+            if distToRotation <= handleHitRadius {
                 let center = item.textCenter
-                let rawDist = hypot(Double(point.x - center.x), Double(point.y - center.y))
-                let safeSize = item.fontSize.isFinite ? min(max(item.fontSize, 8.0), 200.0) : 24.0
-                return .cornerScale(
+                let initialAngle = atan2(Double(point.y - center.y), Double(point.x - center.x))
+                return .textRotate(
                     id: item.id,
                     center: center,
-                    initialDistance: max(rawDist, 8.0),
-                    initialFontSize: safeSize
+                    initialAngle: initialAngle,
+                    initialRotation: item.effectiveRotationRadians
                 )
+            }
+
+            for corner in item.localTextScaleHandleCenters {
+                let distToCorner = hypot(localPoint.x - corner.x, localPoint.y - corner.y)
+                if distToCorner <= handleHitRadius {
+                    let center = item.textCenter
+                    let rawDist = hypot(Double(point.x - center.x), Double(point.y - center.y))
+                    let safeSize = item.fontSize.isFinite ? min(max(item.fontSize, 8.0), 200.0) : 24.0
+                    return .textCornerScale(
+                        id: item.id,
+                        center: center,
+                        initialDistance: max(rawDist, 8.0),
+                        initialFontSize: safeSize
+                    )
+                }
+            }
+            return nil
+        }
+
+        guard let selectionBox = visibleNonTextSelectionBox(for: item) else { return nil }
+        let corners = [
+            CGPoint(x: selectionBox.minX, y: selectionBox.minY),
+            CGPoint(x: selectionBox.maxX, y: selectionBox.minY),
+            CGPoint(x: selectionBox.maxX, y: selectionBox.maxY),
+            CGPoint(x: selectionBox.minX, y: selectionBox.maxY)
+        ]
+        for (cornerIndex, corner) in corners.enumerated() {
+            let distToCorner = hypot(point.x - corner.x, point.y - corner.y)
+            if distToCorner <= handleHitRadius {
+                let anchor = AnnotationCornerScaleAnchor(initialItem: item, cornerIndex: cornerIndex)
+                return .itemCornerScale(anchor: anchor, dragStartPoint: point)
             }
         }
         return nil
@@ -695,6 +746,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let isControlDown = flags.contains(.control)
 
         if isCommandDown {
+            isPostDrawAutoSelection = false
             dragOriginPoint = point
             lastDragPoint = point
             if let hitID = canvasState.hitTestAnnotation(at: point) {
@@ -721,8 +773,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             return
         }
 
-        if let transform = hitTestSelectedTextTransformHandle(at: point) {
-            activeTextTransform = transform
+        if let transform = hitTestSelectedAnnotationTransformHandle(at: point) {
+            isPostDrawAutoSelection = false
+            activeAnnotationTransform = transform
             isDraggingSelection = false
             isMarqueeSelecting = false
             canvasState.beginInteractiveTransform()
@@ -733,10 +786,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         if let hitID = canvasState.hitTestAnnotation(at: point),
            let hitItem = canvasState.annotations.first(where: { $0.id == hitID }) {
             let isAlreadySelected = canvasState.selectedIDs.contains(hitID)
+            let isExplicitSelection = isAlreadySelected && !isPostDrawAutoSelection
             let isTextItem = hitItem.mode == .text
             let isTextMode = settings.currentDrawMode == .text
             let isTextHitInTextMode = isTextMode && isTextItem
-            if isAlreadySelected || isTextHitInTextMode {
+            if isExplicitSelection || isTextHitInTextMode {
+                isPostDrawAutoSelection = false
                 let isDoubleClick = event.clickCount >= 2
                 if isDoubleClick && isTextItem {
                     canvasState.selectedIDs = [hitItem.id]
@@ -755,6 +810,11 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 needsDisplay = true
                 return
             }
+        }
+
+        if isPostDrawAutoSelection {
+            canvasState.selectedIDs.removeAll()
+            isPostDrawAutoSelection = false
         }
 
         if settings.currentDrawMode == .text {
@@ -788,18 +848,18 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         guard activeTextField == nil else { return }
         let flags = event.modifierFlags
 
-        if let transform = activeTextTransform {
+        if let transform = activeAnnotationTransform {
             let hasFiniteDragPoint = point.x.isFinite && point.y.isFinite
             if hasFiniteDragPoint {
                 switch transform {
-                case let .cornerScale(id, center, initialDistance, initialFontSize):
+                case let .textCornerScale(id, center, initialDistance, initialFontSize):
                     let hasFiniteCenter = center.x.isFinite && center.y.isFinite
                     guard hasFiniteCenter else { break }
                     let currentDistance = hypot(Double(point.x - center.x), Double(point.y - center.y))
                     let rawSize = initialFontSize * (currentDistance / max(initialDistance, 8.0))
                     let clampedSize = rawSize.isFinite ? min(max(rawSize, 8.0), 200.0) : initialFontSize
                     canvasState.scaleTextAnnotation(id, toFontSize: clampedSize)
-                case let .rotate(id, center, initialAngle, initialRotation):
+                case let .textRotate(id, center, initialAngle, initialRotation):
                     let hasFiniteCenter = center.x.isFinite && center.y.isFinite
                     guard hasFiniteCenter else { break }
                     let currentAngle = atan2(Double(point.y - center.y), Double(point.x - center.x))
@@ -810,6 +870,13 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                         nextRotation = (nextRotation / snapIncrement).rounded() * snapIncrement
                     }
                     canvasState.setTextRotation(AnnotationCanvasState.sanitizeRotationRadians(nextRotation), for: id)
+                case let .itemCornerScale(anchor, dragStartPoint):
+                    let motion = AnnotationCornerScaleMotion(dragStartPoint: dragStartPoint, currentPoint: point)
+                    let constraint: AnnotationScaleConstraint = flags.contains(.shift) ? .uniform : .free
+                    let request = AnnotationCornerScaleRequest(anchor: anchor, motion: motion)
+                        .withConstraint(constraint)
+                    canvasState.applyCornerScale(request)
+                    syncBackdropBlurViews()
                 }
             }
             needsDisplay = true
@@ -870,9 +937,10 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let point = convert(event.locationInWindow, from: nil)
         cursorLocation = point
 
-        if activeTextTransform != nil {
-            activeTextTransform = nil
+        if activeAnnotationTransform != nil {
+            activeAnnotationTransform = nil
             canvasState.endInteractiveTransform()
+            syncBackdropBlurViews()
             needsDisplay = true
             return
         }
@@ -894,7 +962,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isShiftDown: event.modifierFlags.contains(.shift),
             isOptionDown: event.modifierFlags.contains(.option)
         )
-        canvasState.finishStroke()
+        if let committedID = canvasState.finishStroke() {
+            selectPostDrawAnnotation(committedID)
+        }
         syncBackdropBlurViews()
         needsDisplay = true
     }
@@ -925,16 +995,17 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     override public func magnify(with event: NSEvent) {
-        let canTransformText = activeTextField == nil && canvasState.hasSelectedTextAnnotations
-        guard canTransformText else {
+        let canTransformSelection = activeTextField == nil && canvasState.hasSelectedAnnotations
+        guard canTransformSelection else {
             super.magnify(with: event)
             return
         }
         beginTrackpadTransformIfNeeded(for: event.phase)
         let rawScale = 1.0 + Double(event.magnification)
         let safeScale = rawScale.isFinite ? max(0.1, rawScale) : 1.0
-        canvasState.scaleSelectedTextAnnotations(by: safeScale)
+        canvasState.scaleSelectedAnnotations(by: safeScale)
         endTrackpadTransformIfNeeded(for: event.phase)
+        syncBackdropBlurViews()
         needsDisplay = true
     }
 
@@ -955,6 +1026,10 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         guard settings.isTouchDrawActive else { return }
         let touches = event.touches(matching: .began, in: self)
         guard touches.count == 1, let touch = touches.first else { return }
+        if isPostDrawAutoSelection {
+            canvasState.selectedIDs.removeAll()
+            isPostDrawAutoSelection = false
+        }
         activeTouchIdentity = touch.identity
         let point = touchPoint(for: touch)
         cursorLocation = point
@@ -990,7 +1065,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let touches = event.touches(matching: .ended, in: self)
         guard touches.contains(where: { $0.identity.isEqual(activeID) }) else { return }
         activeTouchIdentity = nil
-        canvasState.finishStroke()
+        if let committedID = canvasState.finishStroke() {
+            selectPostDrawAnnotation(committedID)
+        }
         syncBackdropBlurViews()
         needsDisplay = true
     }
@@ -1010,12 +1087,14 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     @objc public func undo(_ sender: Any?) {
+        isPostDrawAutoSelection = false
         canvasState.undo()
         syncBackdropBlurViews()
         needsDisplay = true
     }
 
     @objc public func redo(_ sender: Any?) {
+        isPostDrawAutoSelection = false
         canvasState.redo()
         syncBackdropBlurViews()
         needsDisplay = true
@@ -1037,6 +1116,34 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         return settings.currentDrawMode == .blur
     }
 
+    private func adjustStrokeLineWeight(by step: Double) {
+        let safeStep = step.isFinite ? step : 0.0
+        let selectedItems = canvasState.annotations.filter { canvasState.selectedIDs.contains($0.id) }
+        let hasSelectedStroke = selectedItems.contains { $0.mode.supportsStrokeLineWeight }
+        if hasSelectedStroke {
+            guard let updatedWeight = canvasState.adjustSelectedStrokeLineWeight(by: safeStep) else { return }
+            let safeUpdated = updatedWeight.isFinite ? min(max(updatedWeight, 1.0), 64.0) : 6.0
+            let isPureStrokeSelection = selectedItems.allSatisfy { $0.mode.supportsStrokeLineWeight }
+            if isPureStrokeSelection {
+                let safeMin = settings.minLineWeight.isFinite ? settings.minLineWeight : 2.0
+                let safeMax = settings.maxLineWeight.isFinite ? max(settings.maxLineWeight, safeMin) : max(24.0, safeMin)
+                settings.lineWeight = min(max(safeUpdated, safeMin), safeMax)
+            } else if safeStep < 0 {
+                settings.decreaseLineWeight(step: abs(safeStep))
+            } else if safeStep > 0 {
+                settings.increaseLineWeight(step: safeStep)
+            }
+            onLineWeightChanged?(safeUpdated)
+            return
+        }
+        if safeStep < 0 {
+            settings.decreaseLineWeight(step: abs(safeStep))
+        } else if safeStep > 0 {
+            settings.increaseLineWeight(step: safeStep)
+        }
+        onLineWeightChanged?(settings.lineWeight)
+    }
+
     private func adjustTextFontSize(by step: Double) {
         let safeStep = step.isFinite ? step : 0.0
         if let updatedSize = canvasState.adjustSelectedTextFontSize(by: safeStep) {
@@ -1049,6 +1156,23 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             let nextSize = min(max(safeBase + safeStep, 10.0), 96.0)
             settings.annotateFontSize = nextSize
             onTextSizeChanged?(nextSize)
+        }
+    }
+
+    private func applySelectedFavoriteColor(at index: Int) {
+        settings.selectFavoriteColor(index: index)
+        let resolvedColor = settings.activeStrokeColor
+        let resolvedGradient = settings.activeStrokeGradient
+        canvasState.applyColorUpdate(
+            AnnotationColorUpdate(color: resolvedColor, gradient: resolvedGradient)
+        )
+        let hasSelectedBlur = canvasState.hasSelectedBlurAnnotations
+        let isActiveCustomBlurTool = settings.currentDrawMode == .blur && settings.blurUseCustomColor
+        if hasSelectedBlur || isActiveCustomBlurTool {
+            if hasSelectedBlur {
+                settings.blurUseCustomColor = true
+            }
+            settings.blurCustomColor = resolvedColor
         }
     }
 
@@ -1083,19 +1207,23 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         guard activeTextField == nil else { return false }
 
         if normMods == KeyBinding.commandMask && keyCode == 0x06 {
+            isPostDrawAutoSelection = false
             canvasState.undo()
             syncBackdropBlurViews()
             needsDisplay = true
             return true
         }
-        if (normMods == (KeyBinding.commandMask | KeyBinding.shiftMask) && keyCode == 0x06)
-            || (normMods == KeyBinding.commandMask && keyCode == 0x10) {
+        let isCommandShiftZ = normMods == (KeyBinding.commandMask | KeyBinding.shiftMask) && keyCode == 0x06
+        let isCommandY = normMods == KeyBinding.commandMask && keyCode == 0x10
+        if isCommandShiftZ || isCommandY {
+            isPostDrawAutoSelection = false
             canvasState.redo()
             syncBackdropBlurViews()
             needsDisplay = true
             return true
         }
         if normMods == KeyBinding.commandMask && keyCode == 0x00 {
+            isPostDrawAutoSelection = false
             canvasState.selectedIDs = Set(canvasState.annotations.map(\.id))
             needsDisplay = true
             return true
@@ -1105,6 +1233,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             return true
         }
         if normMods == 0 && keyCode == 0x75 {
+            isPostDrawAutoSelection = false
             canvasState.deleteSelectedOrClearAll()
             syncBackdropBlurViews()
             needsDisplay = true
@@ -1121,14 +1250,23 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         }
 
         switch matched.command {
-        case .firstFavColor: settings.selectFavoriteColor(index: 0)
-        case .secondFavColor: settings.selectFavoriteColor(index: 1)
-        case .thirdFavColor: settings.selectFavoriteColor(index: 2)
-        case .fourthFavColor: settings.selectFavoriteColor(index: 3)
-        case .fifthFavColor: settings.selectFavoriteColor(index: 4)
+        case .firstFavColor: applySelectedFavoriteColor(at: 0)
+        case .secondFavColor: applySelectedFavoriteColor(at: 1)
+        case .thirdFavColor: applySelectedFavoriteColor(at: 2)
+        case .fourthFavColor: applySelectedFavoriteColor(at: 3)
+        case .fifthFavColor: applySelectedFavoriteColor(at: 4)
         case .randomColors:
             settings.enableGradients = true
             settings.selectRandomColors()
+            let resolvedColor = settings.useRandomColors ? settings.activeGradient.startColor : settings.activeStrokeColor
+            let resolvedGradient = settings.activeStrokeGradient
+            canvasState.applyColorUpdate(
+                AnnotationColorUpdate(color: resolvedColor, gradient: resolvedGradient)
+            )
+            if canvasState.hasSelectedBlurAnnotations {
+                settings.blurUseCustomColor = true
+                settings.blurCustomColor = resolvedColor
+            }
         case .freeHand: settings.selectOrToggleDrawMode(.freeHand)
         case .arrow: settings.selectOrToggleDrawMode(.arrow)
         case .rectangle: settings.selectOrToggleDrawMode(.rectangle)
@@ -1136,7 +1274,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         case .text: settings.selectOrToggleDrawMode(.text)
         case .highlighter: settings.selectOrToggleDrawMode(.highlighter)
         case .blur: settings.selectOrToggleDrawMode(.blur)
-        case .clearAnnotate: canvasState.deleteSelectedOrClearAll()
+        case .clearAnnotate:
+            isPostDrawAutoSelection = false
+            canvasState.deleteSelectedOrClearAll()
         case .decreaseLineWeight:
             if shouldAdjustTextSizeForWeightShortcut {
                 adjustTextFontSize(by: -2.0)
@@ -1146,8 +1286,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 clearBlurCache()
                 onBlurOpacityChanged?(settings.blurOpacity)
             } else {
-                settings.decreaseLineWeight()
-                onLineWeightChanged?(settings.lineWeight)
+                adjustStrokeLineWeight(by: -2.0)
             }
         case .increaseLineWeight:
             if shouldAdjustTextSizeForWeightShortcut {
@@ -1158,12 +1297,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 clearBlurCache()
                 onBlurOpacityChanged?(settings.blurOpacity)
             } else {
-                settings.increaseLineWeight()
-                onLineWeightChanged?(settings.lineWeight)
+                adjustStrokeLineWeight(by: 2.0)
             }
         case .setLineWeight:
             if let digit = matched.lineWeightDigit {
                 settings.setLineWeightFromDigit(digit)
+                canvasState.updateSelectedStrokeLineWeight(settings.lineWeight)
                 onLineWeightChanged?(settings.lineWeight)
             }
         case .touchDraw:
@@ -1179,6 +1318,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 onRequestCopyScreenshot?()
             }
         case .pasteAnnotations:
+            isPostDrawAutoSelection = false
             canvasState.pasteAnnotations()
         case .annotateShortcuts:
             settings.isShowingShortcutsCheatsheet.toggle()
@@ -1212,6 +1352,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         guard hasFiniteResolvedOrigin else { return }
 
         editingAnnotationID = existingID
+        canvasState.activeInlineEditingID = existingID
         let resolvedColor = existingItem?.strokeColor ?? settings.activeStrokeColor
         let resolvedFontName = existingItem?.fontName ?? settings.annotateFont.fontName
         let rawFontSize = existingItem?.fontSize ?? settings.annotateFontSize
@@ -1318,7 +1459,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         field.removeFromSuperview()
         activeTextField = nil
 
-        canvasState.addOrUpdateTextAnnotation(
+        if let committedID = canvasState.addOrUpdateTextAnnotation(
             id: editID,
             at: origin,
             text: value,
@@ -1326,7 +1467,11 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             fontName: resolvedFontName,
             fontSize: resolvedFontSize,
             isAutoErase: settings.autoEraseEnabled
-        )
+        ) {
+            selectPostDrawAnnotation(committedID)
+        } else {
+            isPostDrawAutoSelection = false
+        }
         window?.makeFirstResponder(self)
         needsDisplay = true
     }
@@ -1340,6 +1485,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func clearEditingMetadata() {
+        canvasState.activeInlineEditingID = nil
         editingAnnotationID = nil
         editingInitialTextColor = nil
         editingInitialNSColor = nil
@@ -1615,24 +1761,45 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 }
             }
         }
+        context.restoreGState()
 
         if isSelected && item.mode != .text {
-            let rawBox = item.boundingRect
-            let hasFiniteOrigin = rawBox.origin.x.isFinite && rawBox.origin.y.isFinite
-            let hasFiniteSize = rawBox.size.width.isFinite && rawBox.size.height.isFinite
-            if hasFiniteOrigin && hasFiniteSize {
-                let clippedBox = rawBox.intersection(bounds)
-                if !clippedBox.isNull {
-                    let selectionBox = clippedBox.insetBy(dx: -4, dy: -4)
-                    context.setStrokeColor(NSColor(SettingsView.themeLightBlue).cgColor)
-                    context.setLineWidth(1.5)
-                    context.setLineDash(phase: 0, lengths: [4, 3])
-                    context.stroke(selectionBox)
+            if let selectionBox = visibleNonTextSelectionBox(for: item) {
+                context.saveGState()
+                context.setBlendMode(.normal)
+                context.setStrokeColor(NSColor(SettingsView.themeLightBlue).cgColor)
+                context.setLineWidth(1.5)
+                context.setLineDash(phase: 0, lengths: [4, 3])
+                context.stroke(selectionBox)
+
+                if canvasState.selectedIDs.count == 1 {
+                    let cornerRadius: CGFloat = 4.5
+                    let whiteCG = NSColor.white.cgColor
+                    let primaryBlueCG = NSColor(SettingsView.themeBlue).cgColor
+                    let corners = [
+                        CGPoint(x: selectionBox.minX, y: selectionBox.minY),
+                        CGPoint(x: selectionBox.maxX, y: selectionBox.minY),
+                        CGPoint(x: selectionBox.maxX, y: selectionBox.maxY),
+                        CGPoint(x: selectionBox.minX, y: selectionBox.maxY)
+                    ]
+                    context.setLineDash(phase: 0, lengths: [])
+                    for corner in corners {
+                        let handleRect = CGRect(
+                            x: corner.x - cornerRadius,
+                            y: corner.y - cornerRadius,
+                            width: cornerRadius * 2.0,
+                            height: cornerRadius * 2.0
+                        )
+                        context.setFillColor(whiteCG)
+                        context.fillEllipse(in: handleRect)
+                        context.setStrokeColor(primaryBlueCG)
+                        context.setLineWidth(1.5)
+                        context.strokeEllipse(in: handleRect)
+                    }
                 }
+                context.restoreGState()
             }
         }
-
-        context.restoreGState()
     }
 
     private func strokePath(_ path: CGPath, item: AnnotationItem, color: NSColor, in context: CGContext) {
