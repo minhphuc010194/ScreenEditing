@@ -2295,14 +2295,34 @@ final class PresentifyCoreTests: XCTestCase {
         var clickCount: Int = 1
     }
 
+    private final class SyntheticTouch: NSTouch, @unchecked Sendable {
+        var stubIdentity: NSString = "touch-0"
+        var stubPhase: NSTouch.Phase = .began
+        var stubNormalizedPosition: NSPoint = .zero
+
+        override var identity: any NSObjectProtocol & NSCopying { stubIdentity }
+        override var phase: NSTouch.Phase { stubPhase }
+        override var normalizedPosition: NSPoint { stubNormalizedPosition }
+        override var hash: Int { ObjectIdentifier(self).hashValue }
+
+        override func isEqual(_ object: Any?) -> Bool {
+            self === (object as AnyObject)
+        }
+    }
+
     private final class SyntheticTrackpadEvent: NSEvent {
         var stubMagnification: CGFloat = 0
         var stubRotation: Float = 0
         var stubPhase: NSEvent.Phase = []
+        var stubTouches: Set<NSTouch> = []
 
         override var magnification: CGFloat { stubMagnification }
         override var rotation: Float { stubRotation }
         override var phase: NSEvent.Phase { stubPhase }
+
+        override func touches(matching phase: NSTouch.Phase, in view: NSView?) -> Set<NSTouch> {
+            Set(stubTouches.filter { !phase.intersection($0.phase).isEmpty })
+        }
     }
 
     private func makeMouseEvent(_ spec: SyntheticMouseSpec, in window: NSWindow?) -> NSEvent {
@@ -3925,5 +3945,1619 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(canvas.undoStack.count, undoAfterDeactivateDrag + 1)
 
         overlay.hideAnnotation()
+    }
+
+    private struct StrokeDragSpec {
+        var start: CGPoint
+        var end: CGPoint
+        var midpoints: [CGPoint] = []
+        var modifiers: NSEvent.ModifierFlags = []
+    }
+
+    private func performMouseDrag(_ spec: StrokeDragSpec, on target: (window: NSWindow, view: AnnotateCanvasView)) {
+        target.view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: spec.start, modifiers: spec.modifiers),
+                in: target.window
+            )
+        )
+        for midpoint in spec.midpoints {
+            target.view.mouseDragged(
+                with: makeMouseEvent(
+                    SyntheticMouseSpec(type: .leftMouseDragged, location: midpoint, modifiers: spec.modifiers),
+                    in: target.window
+                )
+            )
+        }
+        target.view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: spec.end, modifiers: spec.modifiers),
+                in: target.window
+            )
+        )
+        target.view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: spec.end, modifiers: spec.modifiers),
+                in: target.window
+            )
+        )
+    }
+
+    private struct RasterizedCanvas {
+        var width: Int
+        var height: Int
+        var scaleX: Double
+        var scaleY: Double
+        var viewHeight: CGFloat
+        var bytes: [UInt8]
+
+        func pixelRGBA(at viewPoint: CGPoint) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+            let hasFinitePoint = viewPoint.x.isFinite && viewPoint.y.isFinite
+            let hasFiniteScale = scaleX.isFinite && scaleY.isFinite
+            guard hasFinitePoint && hasFiniteScale else { return nil }
+            let rawX = Double(viewPoint.x) * scaleX
+            let rawY = Double(viewHeight - viewPoint.y) * scaleY
+            guard rawX.isFinite && rawY.isFinite else { return nil }
+            let pxX = Int(rawX.rounded())
+            let pxY = Int(rawY.rounded())
+            let inX = pxX >= 0 && pxX < width
+            let inY = pxY >= 0 && pxY < height
+            guard inX && inY else { return nil }
+            let offset = (pxY * width + pxX) * 4
+            return (bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3])
+        }
+    }
+
+    private func rasterizeCanvasView(_ view: AnnotateCanvasView) -> RasterizedCanvas? {
+        guard let pngData = Screenshotter.renderViewToPNGData(view),
+              let cgImage = NSBitmapImageRep(data: pngData)?.cgImage else {
+            return nil
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return nil
+        }
+        let imgWidth = cgImage.width
+        let imgHeight = cgImage.height
+        var bytes = [UInt8](repeating: 0, count: imgWidth * imgHeight * 4)
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        let didRasterize = bytes.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let context = CGContext(
+                data: rawBuffer.baseAddress,
+                width: imgWidth,
+                height: imgHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: imgWidth * 4,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return false
+            }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: imgWidth, height: imgHeight))
+            return true
+        }
+        guard didRasterize else { return nil }
+        let scaleX = Double(imgWidth) / Double(max(1.0, view.bounds.width))
+        let scaleY = Double(imgHeight) / Double(max(1.0, view.bounds.height))
+        return RasterizedCanvas(
+            width: imgWidth,
+            height: imgHeight,
+            scaleX: scaleX,
+            scaleY: scaleY,
+            viewHeight: view.bounds.height,
+            bytes: bytes
+        )
+    }
+
+    private func sendColorPanelColor(_ color: PresentifyCore.RGBColor) {
+        _ = NSApplication.shared
+        let panel = NSColorPanel.shared
+        panel.color = color.nsColor
+        CustomColorPanelBridge.shared.colorPanelDidChange(panel)
+    }
+
+    func testPostDrawAutoSelectionAllowsImmediateRecolorAndCornerScaleWithoutBreakingConsecutiveStrokes() {
+        let headless = AnnotationCanvasState()
+        headless.beginStroke(at: CGPoint(x: 10, y: 10), mode: .arrow, color: .red, lineWeight: 4.0)
+        headless.updateStroke(to: CGPoint(x: 60, y: 40))
+        let headlessArrowID = headless.finishStroke()
+        XCTAssertNotNil(headlessArrowID)
+        XCTAssertTrue(headless.selectedIDs.isEmpty)
+
+        headless.beginStroke(at: CGPoint(x: 10, y: 10), mode: .blur, color: .red, lineWeight: 4.0)
+        headless.updateStroke(to: CGPoint(x: 10.5, y: 10.5))
+        XCTAssertNil(headless.finishStroke())
+
+        let headlessTextID = headless.addOrUpdateTextAnnotation(
+            at: CGPoint(x: 20, y: 20),
+            text: "Headless",
+            color: .white
+        )
+        XCTAssertNotNil(headlessTextID)
+        XCTAssertTrue(headless.selectedIDs.isEmpty)
+        XCTAssertNil(
+            headless.addOrUpdateTextAnnotation(
+                id: headlessTextID,
+                at: CGPoint(x: 20, y: 20),
+                text: "   ",
+                color: .white
+            )
+        )
+
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+        let target = (window: window, view: view)
+
+        settings.selectFavoriteColor(index: 0)
+        settings.currentDrawMode = .arrow
+        performMouseDrag(
+            StrokeDragSpec(start: CGPoint(x: 40, y: 60), end: CGPoint(x: 140, y: 120)),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 1)
+        let arrowID = canvas.annotations[0].id
+        XCTAssertEqual(canvas.selectedIDs, [arrowID])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x13, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].strokeColor, settings.favColors[1])
+
+        let arrowTopRight = canvas.annotations[0].selectionScaleHandleCenters[2]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: arrowTopRight,
+                end: CGPoint(x: arrowTopRight.x + 30, y: arrowTopRight.y + 20)
+            ),
+            on: target
+        )
+        XCTAssertFalse(view.isPostDrawAutoSelection)
+        XCTAssertEqual(canvas.annotations[0].startPoint, CGPoint(x: 40, y: 60))
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, 170, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint.y, 140, accuracy: 1e-6)
+
+        settings.currentDrawMode = .freeHand
+        performMouseDrag(
+            StrokeDragSpec(
+                start: CGPoint(x: 200, y: 60),
+                end: CGPoint(x: 200, y: 160),
+                midpoints: [CGPoint(x: 200, y: 110)]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 2)
+        let stemSnapshot = canvas.annotations[1]
+        XCTAssertEqual(canvas.selectedIDs, [stemSnapshot.id])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+
+        performMouseDrag(
+            StrokeDragSpec(
+                start: CGPoint(x: 200, y: 110),
+                end: CGPoint(x: 245, y: 110),
+                midpoints: [CGPoint(x: 222, y: 110)]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 3)
+        XCTAssertEqual(canvas.annotations[1], stemSnapshot)
+        XCTAssertEqual(canvas.selectedIDs, [canvas.annotations[2].id])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+
+        settings.currentDrawMode = .rectangle
+        performMouseDrag(
+            StrokeDragSpec(start: CGPoint(x: 260, y: 50), end: CGPoint(x: 320, y: 100)),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 4)
+        let rectID = canvas.annotations[3].id
+        XCTAssertEqual(canvas.selectedIDs, [rectID])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+
+        settings.currentDrawMode = .blur
+        performMouseDrag(
+            StrokeDragSpec(start: CGPoint(x: 260, y: 130), end: CGPoint(x: 335, y: 190)),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 5)
+        let blurID = canvas.annotations[4].id
+        XCTAssertEqual(canvas.selectedIDs, [blurID])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+        controls.selectFavoriteColor(at: 2)
+        XCTAssertEqual(canvas.annotations[4].blurTintColor, settings.favColors[2])
+
+        settings.currentDrawMode = .text
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: CGPoint(x: 80, y: 240)), in: window))
+        view.activeTextField?.stringValue = "Auto Selected Text"
+        view.commitActiveTextEditing()
+        XCTAssertEqual(canvas.annotations.count, 6)
+        let textID = canvas.annotations[5].id
+        XCTAssertEqual(canvas.selectedIDs, [textID])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x15, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[5].strokeColor, settings.favColors[3])
+
+        settings.currentDrawMode = .rectangle
+        let rectEdgePoint = CGPoint(x: 260, y: 75)
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: rectEdgePoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: rectEdgePoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        XCTAssertEqual(canvas.selectedIDs, [rectID])
+        XCTAssertFalse(view.isPostDrawAutoSelection)
+
+        performMouseDrag(
+            StrokeDragSpec(start: rectEdgePoint, end: CGPoint(x: 280, y: 90)),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 6)
+        XCTAssertEqual(canvas.annotations[3].startPoint, CGPoint(x: 280, y: 65))
+        XCTAssertEqual(canvas.annotations[3].endPoint, CGPoint(x: 340, y: 115))
+    }
+
+    func testDirectAndLiveColorPanelRecoloringAcrossAllModesCoalescesUndo() {
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateSaveSession = false
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let overlay = AnnotateOverlayController(settings: settings, shortcutManager: shortcuts, canvasState: canvas)
+        overlay.showAnnotation()
+        defer {
+            CustomColorPanelBridge.shared.close()
+            overlay.hideAnnotation()
+        }
+        guard let view = overlay.canvasView else {
+            XCTFail("Expected overlay canvasView")
+            return
+        }
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+
+        let textItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 40, y: 40),
+            endPoint: CGPoint(x: 40, y: 40),
+            strokeColor: .white,
+            text: "Recolor",
+            fontSize: 24.0
+        )
+        let arrowItem = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 40, y: 90), CGPoint(x: 120, y: 130)],
+            startPoint: CGPoint(x: 40, y: 90),
+            endPoint: CGPoint(x: 120, y: 130),
+            strokeColor: .red,
+            lineWeight: 4.0
+        )
+        let freeHandItem = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 40, y: 150), CGPoint(x: 90, y: 170), CGPoint(x: 130, y: 155)],
+            startPoint: CGPoint(x: 40, y: 150),
+            endPoint: CGPoint(x: 130, y: 155),
+            strokeColor: .red,
+            lineWeight: 5.0
+        )
+        let rectItem = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 160, y: 40),
+            endPoint: CGPoint(x: 230, y: 95),
+            strokeColor: .red,
+            lineWeight: 4.0
+        )
+        let circleItem = AnnotationItem(
+            mode: .circle,
+            startPoint: CGPoint(x: 160, y: 120),
+            endPoint: CGPoint(x: 230, y: 180),
+            strokeColor: .red,
+            lineWeight: 4.0
+        )
+        let highlighterItem = AnnotationItem(
+            mode: .highlighter,
+            points: [CGPoint(x: 40, y: 210), CGPoint(x: 150, y: 210)],
+            startPoint: CGPoint(x: 40, y: 210),
+            endPoint: CGPoint(x: 150, y: 210),
+            strokeColor: PresentifyCore.RGBColor.red.withAlpha(0.42),
+            lineWeight: 18.0,
+            isHighlighter: true
+        )
+        let blurItem = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 260, y: 60),
+            endPoint: CGPoint(x: 340, y: 130),
+            strokeColor: .red,
+            blurStyle: .gaussian,
+            blurOpacity: 0.6,
+            blurTintColor: .white
+        )
+
+        canvas.annotations = [textItem, arrowItem, freeHandItem, rectItem, circleItem, highlighterItem, blurItem]
+        canvas.selectedIDs = Set(canvas.annotations.map(\.id))
+
+        controls.selectFavoriteColor(at: 2)
+        let favTwo = settings.favColors[2]
+        XCTAssertEqual(canvas.annotations[0].strokeColor, favTwo)
+        XCTAssertNil(canvas.annotations[0].gradientPair)
+        XCTAssertEqual(canvas.annotations[1].strokeColor, favTwo)
+        XCTAssertEqual(canvas.annotations[2].strokeColor, favTwo)
+        XCTAssertEqual(canvas.annotations[3].strokeColor, favTwo)
+        XCTAssertEqual(canvas.annotations[4].strokeColor, favTwo)
+        XCTAssertEqual(canvas.annotations[5].strokeColor, favTwo.withAlpha(0.42))
+        XCTAssertEqual(canvas.annotations[5].strokeColor.alpha, 0.42, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[6].blurTintColor, favTwo)
+        XCTAssertTrue(settings.blurUseCustomColor)
+        XCTAssertEqual(settings.blurCustomColor, favTwo)
+
+        controls.selectRandomColors()
+        let activeGrad = settings.activeGradient
+        let resolvedRandomColor = settings.blurCustomColor
+        XCTAssertEqual(canvas.annotations[0].strokeColor, resolvedRandomColor)
+        XCTAssertEqual(canvas.annotations[1].strokeColor, resolvedRandomColor)
+        XCTAssertNil(canvas.annotations[0].gradientPair)
+        XCTAssertEqual(canvas.annotations[1].gradientPair, activeGrad)
+        XCTAssertEqual(canvas.annotations[2].gradientPair, activeGrad)
+        XCTAssertEqual(canvas.annotations[3].gradientPair, activeGrad)
+        XCTAssertEqual(canvas.annotations[4].gradientPair, activeGrad)
+        XCTAssertEqual(canvas.annotations[5].gradientPair, activeGrad)
+        XCTAssertEqual(canvas.annotations[5].strokeColor.alpha, 0.42, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[6].blurTintColor, resolvedRandomColor)
+
+        let shortcutKeyCodes: [(UInt16, Int)] = [(0x12, 0), (0x13, 1), (0x14, 2), (0x15, 3), (0x17, 4)]
+        for (keyCode, favIndex) in shortcutKeyCodes {
+            XCTAssertTrue(view.handleKeyCommand(keyCode: keyCode, modifiers: 0))
+            let expected = settings.favColors[favIndex]
+            XCTAssertEqual(canvas.annotations[1].strokeColor, expected)
+            XCTAssertNil(canvas.annotations[1].gradientPair)
+            XCTAssertEqual(canvas.annotations[5].strokeColor.alpha, 0.42, accuracy: 1e-6)
+            XCTAssertEqual(canvas.annotations[6].blurTintColor, expected)
+        }
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x16, modifiers: 0))
+        XCTAssertNotNil(canvas.annotations[1].gradientPair)
+        XCTAssertNil(canvas.annotations[0].gradientPair)
+
+        canvas.selectedIDs = [textItem.id, arrowItem.id, highlighterItem.id]
+        controls.selectFavoriteColor(at: 0)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        let baselineStrokeColor = canvas.annotations[1].strokeColor
+        let undoBeforeStrokePanel = canvas.undoStack.count
+
+        CustomColorPanelBridge.shared.present(for: settings, canvasState: canvas)
+        let panelColors = [
+            PresentifyCore.RGBColor(red: 0.92, green: 0.35, blue: 0.18),
+            PresentifyCore.RGBColor(red: 0.22, green: 0.74, blue: 0.80),
+            PresentifyCore.RGBColor(red: 0.16, green: 0.42, blue: 0.94),
+            PresentifyCore.RGBColor(red: 0.12, green: 0.78, blue: 0.44)
+        ]
+        for color in panelColors {
+            sendColorPanelColor(color)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeStrokePanel + 1)
+        XCTAssertEqual(canvas.annotations[0].strokeColor.red, 0.12, accuracy: 0.03)
+        XCTAssertEqual(canvas.annotations[0].strokeColor.green, 0.78, accuracy: 0.03)
+        XCTAssertEqual(canvas.annotations[1].strokeColor.blue, 0.44, accuracy: 0.03)
+        XCTAssertEqual(canvas.annotations[5].strokeColor.alpha, 0.42, accuracy: 1e-6)
+
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[1].strokeColor, baselineStrokeColor)
+
+        canvas.selectedIDs = [blurItem.id]
+        canvas.applyColorUpdate(AnnotationColorUpdate(color: .white))
+        settings.setCustomBlurTintColor(.white)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        let undoBeforeBlurPanel = canvas.undoStack.count
+
+        CustomColorPanelBridge.shared.presentForBlurTint(for: settings, canvasState: canvas)
+        sendColorPanelColor(PresentifyCore.RGBColor(red: 0.85, green: 0.25, blue: 0.25))
+        sendColorPanelColor(PresentifyCore.RGBColor(red: 0.25, green: 0.65, blue: 0.85))
+        sendColorPanelColor(PresentifyCore.RGBColor(red: 0.20, green: 0.82, blue: 0.52))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeBlurPanel + 1)
+        XCTAssertEqual(canvas.annotations[6].blurTintColor?.green ?? 0.0, 0.82, accuracy: 0.03)
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[6].blurTintColor, .white)
+    }
+
+    func testNonTextCornerScaleHandlesRenderSingleVsMultiSelectAndScaleAllModesWithUndo() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        settings.isWhiteboardActive = false
+        settings.dimScreenOnAnnotate = false
+        settings.annotateToolIndicator = false
+        let target = (window: window, view: view)
+
+        let rectItem = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 100, y: 100),
+            endPoint: CGPoint(x: 220, y: 180),
+            strokeColor: .yellow,
+            lineWeight: 2.0
+        )
+        canvas.annotations = [rectItem]
+        canvas.selectedIDs = [rectItem.id]
+
+        guard let singleRaster = rasterizeCanvasView(view) else {
+            XCTFail("Expected rasterized canvas for single-selected rectangle")
+            return
+        }
+        for handleCenter in rectItem.selectionScaleHandleCenters {
+            guard let centerRGBA = singleRaster.pixelRGBA(at: handleCenter) else {
+                XCTFail("Expected handle center pixel in bounds")
+                return
+            }
+            let isBrightR = centerRGBA.r >= 220 && centerRGBA.g >= 220
+            let isBrightBA = centerRGBA.b >= 220 && centerRGBA.a >= 200
+            XCTAssertTrue(isBrightR && isBrightBA)
+
+            var foundBlueRing = false
+            for dy in -6...6 {
+                for dx in -6...6 {
+                    let probe = CGPoint(x: handleCenter.x + CGFloat(dx), y: handleCenter.y + CGFloat(dy))
+                    guard let ringRGBA = singleRaster.pixelRGBA(at: probe) else { continue }
+                    let isStrongBlue = ringRGBA.b >= 170 && Int(ringRGBA.b) > Int(ringRGBA.r) + 70
+                    if isStrongBlue && ringRGBA.a >= 120 {
+                        foundBlueRing = true
+                    }
+                }
+            }
+            XCTAssertTrue(foundBlueRing)
+        }
+
+        for py in 85...195 {
+            for px in 85...235 {
+                guard let sample = singleRaster.pixelRGBA(at: CGPoint(x: px, y: py)) else { continue }
+                let hasHighRB = sample.r >= 110 && sample.b >= 140
+                let dominatesGreen = Int(sample.r) > Int(sample.g) + 45 && Int(sample.b) > Int(sample.g) + 45
+                XCTAssertFalse(hasHighRB && dominatesGreen)
+            }
+        }
+
+        let highlighterVisual = AnnotationItem(
+            mode: .highlighter,
+            points: [CGPoint(x: 90, y: 260), CGPoint(x: 210, y: 260)],
+            startPoint: CGPoint(x: 90, y: 260),
+            endPoint: CGPoint(x: 210, y: 260),
+            strokeColor: PresentifyCore.RGBColor.yellow.withAlpha(0.42),
+            lineWeight: 18.0,
+            isHighlighter: true
+        )
+        canvas.annotations = [highlighterVisual]
+        canvas.selectedIDs = [highlighterVisual.id]
+        guard let highlighterRaster = rasterizeCanvasView(view),
+              let hlCornerRGBA = highlighterRaster.pixelRGBA(at: highlighterVisual.selectionScaleHandleCenters[0]) else {
+            XCTFail("Expected rasterized highlighter handle center")
+            return
+        }
+        let hlWhiteRG = hlCornerRGBA.r >= 220 && hlCornerRGBA.g >= 220
+        let hlWhiteBA = hlCornerRGBA.b >= 220 && hlCornerRGBA.a >= 200
+        XCTAssertTrue(hlWhiteRG && hlWhiteBA)
+
+        let secondCircle = AnnotationItem(
+            mode: .circle,
+            startPoint: CGPoint(x: 260, y: 100),
+            endPoint: CGPoint(x: 330, y: 170),
+            strokeColor: .green,
+            lineWeight: 3.0
+        )
+        canvas.annotations = [rectItem, secondCircle]
+        canvas.selectedIDs = [rectItem.id, secondCircle.id]
+
+        guard let multiRaster = rasterizeCanvasView(view) else {
+            XCTFail("Expected rasterized canvas for multi-selection")
+            return
+        }
+        var foundMultiDashedBorder = false
+        let rectBox = rectItem.nonTextSelectionBox
+        for step in 2...18 {
+            let edgeX = rectBox.minX + rectBox.width * (CGFloat(step) / 20.0)
+            for dy in -2...2 {
+                let probe = CGPoint(x: edgeX, y: rectBox.maxY + CGFloat(dy))
+                guard let edgeRGBA = multiRaster.pixelRGBA(at: probe) else { continue }
+                let isLightBlue = Int(edgeRGBA.b) > Int(edgeRGBA.r) + 60 && edgeRGBA.b >= 120
+                if isLightBlue && edgeRGBA.a >= 80 {
+                    foundMultiDashedBorder = true
+                }
+            }
+        }
+        XCTAssertTrue(foundMultiDashedBorder)
+
+        if let suppressedCorner = multiRaster.pixelRGBA(at: rectItem.selectionScaleHandleCenters[0]) {
+            let isWhiteFillRG = suppressedCorner.r >= 220 && suppressedCorner.g >= 220
+            let isWhiteFillBA = suppressedCorner.b >= 220 && suppressedCorner.a >= 200
+            XCTAssertFalse(isWhiteFillRG && isWhiteFillBA)
+        }
+
+        canvas.annotations = [rectItem]
+        canvas.selectedIDs = [rectItem.id]
+        let undoBeforeZeroDrag = canvas.undoStack.count
+        let zeroHandle = canvas.annotations[0].selectionScaleHandleCenters[2]
+        performMouseDrag(StrokeDragSpec(start: zeroHandle, end: zeroHandle), on: target)
+        XCTAssertEqual(canvas.annotations[0], rectItem)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeZeroDrag)
+
+        let undoBeforeRectScale = canvas.undoStack.count
+        performMouseDrag(
+            StrokeDragSpec(
+                start: zeroHandle,
+                end: CGPoint(x: zeroHandle.x + 40, y: zeroHandle.y + 25),
+                midpoints: [
+                    CGPoint(x: zeroHandle.x + 15, y: zeroHandle.y + 10),
+                    CGPoint(x: zeroHandle.x + 28, y: zeroHandle.y + 18)
+                ]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeRectScale + 1)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.minX, 100, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.minY, 100, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.width, 160, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.height, 105, accuracy: 1e-6)
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].boundingRect, CGRect(x: 100, y: 100, width: 120, height: 80))
+        canvas.redo()
+        XCTAssertEqual(canvas.annotations[0].boundingRect, CGRect(x: 100, y: 100, width: 160, height: 105))
+
+        canvas.selectedIDs = [rectItem.id]
+        let rectBottomRight = canvas.annotations[0].selectionScaleHandleCenters[1]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: rectBottomRight,
+                end: CGPoint(x: rectBottomRight.x + 30, y: rectBottomRight.y - 10),
+                modifiers: [.shift]
+            ),
+            on: target
+        )
+        XCTAssertEqual(
+            canvas.annotations[0].boundingRect.width,
+            canvas.annotations[0].boundingRect.height,
+            accuracy: 1e-6
+        )
+        XCTAssertEqual(canvas.annotations[0].boundingRect.minX, 100, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.maxY, 205, accuracy: 1e-6)
+
+        let circleItem = AnnotationItem(
+            mode: .circle,
+            startPoint: CGPoint(x: 60, y: 60),
+            endPoint: CGPoint(x: 140, y: 120),
+            strokeColor: .green,
+            lineWeight: 3.0
+        )
+        canvas.annotations = [circleItem]
+        canvas.selectedIDs = [circleItem.id]
+        let circleBottomLeft = circleItem.selectionScaleHandleCenters[0]
+        let undoBeforeCircleScale = canvas.undoStack.count
+        performMouseDrag(
+            StrokeDragSpec(
+                start: circleBottomLeft,
+                end: CGPoint(x: circleBottomLeft.x - 20, y: circleBottomLeft.y - 15),
+                midpoints: [CGPoint(x: circleBottomLeft.x - 10, y: circleBottomLeft.y - 8)]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeCircleScale + 1)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.maxX, 140, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.maxY, 120, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.minX, 40, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.minY, 45, accuracy: 1e-6)
+
+        let blurItem = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 80, y: 80),
+            endPoint: CGPoint(x: 180, y: 150),
+            strokeColor: .red,
+            blurStyle: .gaussian,
+            blurOpacity: 0.55
+        )
+        canvas.annotations = [blurItem]
+        canvas.selectedIDs = [blurItem.id]
+        view.syncBackdropBlurViews()
+        let blurTopLeft = blurItem.selectionScaleHandleCenters[3]
+        let undoBeforeBlurScale = canvas.undoStack.count
+        performMouseDrag(
+            StrokeDragSpec(
+                start: blurTopLeft,
+                end: CGPoint(x: blurTopLeft.x - 30, y: blurTopLeft.y + 20)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeBlurScale + 1)
+        XCTAssertEqual(canvas.annotations[0].boundingRect, CGRect(x: 50, y: 80, width: 130, height: 90))
+        XCTAssertEqual(view.backdropBlurViews[blurItem.id]?.frame, CGRect(x: 50, y: 80, width: 130, height: 90))
+
+        let diagonalArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 50, y: 60), CGPoint(x: 150, y: 140)],
+            startPoint: CGPoint(x: 50, y: 60),
+            endPoint: CGPoint(x: 150, y: 140),
+            strokeColor: .red,
+            lineWeight: 4.0
+        )
+        canvas.annotations = [diagonalArrow]
+        canvas.selectedIDs = [diagonalArrow.id]
+        let diagTopRight = diagonalArrow.selectionScaleHandleCenters[2]
+        let undoBeforeDiagArrow = canvas.undoStack.count
+        performMouseDrag(
+            StrokeDragSpec(
+                start: diagTopRight,
+                end: CGPoint(x: diagTopRight.x + 50, y: diagTopRight.y + 40),
+                midpoints: [CGPoint(x: diagTopRight.x + 25, y: diagTopRight.y + 20)]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeDiagArrow + 1)
+        XCTAssertEqual(canvas.annotations[0].startPoint, CGPoint(x: 50, y: 60))
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, 200, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint.y, 180, accuracy: 1e-6)
+
+        let horizontalArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 60, y: 200), CGPoint(x: 160, y: 200)],
+            startPoint: CGPoint(x: 60, y: 200),
+            endPoint: CGPoint(x: 160, y: 200),
+            strokeColor: .red,
+            lineWeight: 4.0
+        )
+        canvas.annotations = [horizontalArrow]
+        canvas.selectedIDs = [horizontalArrow.id]
+        let horizHeadHandle = horizontalArrow.selectionScaleHandleCenters[2]
+        let undoBeforeHorizHead = canvas.undoStack.count
+        performMouseDrag(
+            StrokeDragSpec(
+                start: horizHeadHandle,
+                end: CGPoint(x: horizHeadHandle.x + 60, y: horizHeadHandle.y)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeHorizHead + 1)
+        XCTAssertEqual(canvas.annotations[0].startPoint.x, 60, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].startPoint.y, 200, accuracy: 1e-6)
+        XCTAssertGreaterThan(canvas.annotations[0].endPoint.x, 205)
+        XCTAssertEqual(canvas.annotations[0].endPoint.y, 200, accuracy: 1e-6)
+
+        let anchoredHeadX = canvas.annotations[0].endPoint.x
+        let horizTailHandle = canvas.annotations[0].selectionScaleHandleCenters[0]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: horizTailHandle,
+                end: CGPoint(x: horizTailHandle.x - 35, y: horizTailHandle.y)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, anchoredHeadX, accuracy: 1e-6)
+        XCTAssertLessThan(canvas.annotations[0].startPoint.x, 35)
+
+        let verticalArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 300, y: 80), CGPoint(x: 300, y: 180)],
+            startPoint: CGPoint(x: 300, y: 80),
+            endPoint: CGPoint(x: 300, y: 180),
+            strokeColor: .red,
+            lineWeight: 4.0
+        )
+        canvas.annotations = [verticalArrow]
+        canvas.selectedIDs = [verticalArrow.id]
+        let vertHeadHandle = verticalArrow.selectionScaleHandleCenters[2]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: vertHeadHandle,
+                end: CGPoint(x: vertHeadHandle.x, y: vertHeadHandle.y + 55)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].startPoint.x, 300, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].startPoint.y, 80, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, 300, accuracy: 1e-6)
+        XCTAssertGreaterThan(canvas.annotations[0].endPoint.y, 225)
+
+        let freeHandItem = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 50, y: 50), CGPoint(x: 90, y: 110), CGPoint(x: 130, y: 70)],
+            startPoint: CGPoint(x: 50, y: 50),
+            endPoint: CGPoint(x: 130, y: 70),
+            strokeColor: .orange,
+            lineWeight: 4.0
+        )
+        canvas.annotations = [freeHandItem]
+        canvas.selectedIDs = [freeHandItem.id]
+        let fhTopRight = freeHandItem.selectionScaleHandleCenters[2]
+        let undoBeforeFreeHand = canvas.undoStack.count
+        performMouseDrag(
+            StrokeDragSpec(
+                start: fhTopRight,
+                end: CGPoint(x: fhTopRight.x + 40, y: fhTopRight.y + 30)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeFreeHand + 1)
+        XCTAssertEqual(canvas.annotations[0].points[0], CGPoint(x: 50, y: 50))
+        XCTAssertEqual(canvas.annotations[0].points[1].x, 110, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].points[1].y, 140, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].points[2].x, 170, accuracy: 1e-6)
+
+        let highlighterCurve = AnnotationItem(
+            mode: .highlighter,
+            points: [CGPoint(x: 60, y: 220), CGPoint(x: 110, y: 260), CGPoint(x: 160, y: 230)],
+            startPoint: CGPoint(x: 60, y: 220),
+            endPoint: CGPoint(x: 160, y: 230),
+            strokeColor: PresentifyCore.RGBColor.yellow.withAlpha(0.42),
+            lineWeight: 16.0,
+            isHighlighter: true
+        )
+        canvas.annotations = [highlighterCurve]
+        canvas.selectedIDs = [highlighterCurve.id]
+        let hlBottomRight = highlighterCurve.selectionScaleHandleCenters[1]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: hlBottomRight,
+                end: CGPoint(x: hlBottomRight.x + 50, y: hlBottomRight.y - 20)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].points[0].x, 60, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].points[1].y, 260, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].points[2].x, 210, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].points[0].y, 200, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].strokeColor.alpha, 0.42, accuracy: 1e-6)
+    }
+
+    func testTrackpadMagnifyStrokeLineWeightShortcutsControlsAndOrphanCornerScaleRecovery() {
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateSaveSession = false
+        settings.lineWeight = 6.0
+        settings.currentDrawMode = .blur
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let overlay = AnnotateOverlayController(settings: settings, shortcutManager: shortcuts, canvasState: canvas)
+        overlay.showAnnotation()
+        defer { overlay.hideAnnotation() }
+
+        guard let panel = overlay.panel, let view = overlay.canvasView else {
+            XCTFail("Expected overlay panel and canvasView")
+            return
+        }
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+
+        let rectItem = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 100, y: 100),
+            endPoint: CGPoint(x: 200, y: 160),
+            strokeColor: .red,
+            lineWeight: 6.0
+        )
+        let freeHandItem = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 40, y: 40), CGPoint(x: 80, y: 80)],
+            startPoint: CGPoint(x: 40, y: 40),
+            endPoint: CGPoint(x: 80, y: 80),
+            strokeColor: .blue,
+            lineWeight: 6.0
+        )
+        let blurItem = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 240, y: 80),
+            endPoint: CGPoint(x: 320, y: 150),
+            strokeColor: .red,
+            blurStyle: .gaussian,
+            blurOpacity: 0.55
+        )
+        canvas.annotations = [rectItem, freeHandItem, blurItem]
+        canvas.selectedIDs = [rectItem.id, freeHandItem.id]
+
+        let undoBeforePinch = canvas.undoStack.count
+        let pinchBegan = SyntheticTrackpadEvent()
+        pinchBegan.stubPhase = .began
+        pinchBegan.stubMagnification = 0.25
+        view.magnify(with: pinchBegan)
+
+        let pinchChanged = SyntheticTrackpadEvent()
+        pinchChanged.stubPhase = .changed
+        pinchChanged.stubMagnification = 0.20
+        view.magnify(with: pinchChanged)
+
+        let pinchEnded = SyntheticTrackpadEvent()
+        pinchEnded.stubPhase = .ended
+        pinchEnded.stubMagnification = 0.0
+        view.magnify(with: pinchEnded)
+
+        XCTAssertEqual(canvas.undoStack.count, undoBeforePinch + 1)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.midX, 150, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].boundingRect.midY, 130, accuracy: 1e-6)
+        XCTAssertGreaterThan(canvas.annotations[0].boundingRect.width, 145)
+        XCTAssertGreaterThan(canvas.annotations[0].boundingRect.height, 85)
+        XCTAssertEqual(canvas.annotations[1].boundingRect.midX, 60, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].boundingRect.midY, 60, accuracy: 1e-6)
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].boundingRect, rectItem.boundingRect)
+
+        canvas.selectedIDs = [rectItem.id, freeHandItem.id]
+        XCTAssertFalse(controls.isAdjustingBlurOpacity)
+        XCTAssertFalse(controls.isAdjustingTextSize)
+        XCTAssertEqual(controls.displayedLineWeight, 6.0, accuracy: 1e-6)
+
+        let undoBeforeIncreaseKey = canvas.undoStack.count
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(settings.lineWeight, 8.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 8.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 8.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeIncreaseKey + 1)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(settings.lineWeight, 6.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 6.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 6.0, accuracy: 1e-6)
+
+        let ctrlOptModifiers = NSEvent.ModifierFlags([.control, .option]).rawValue
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x15, modifiers: ctrlOptModifiers))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, settings.lineWeight, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, settings.lineWeight, accuracy: 1e-6)
+
+        controls.increaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, settings.lineWeight, accuracy: 1e-6)
+        controls.decreaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, settings.lineWeight, accuracy: 1e-6)
+
+        canvas.selectedIDs = [blurItem.id]
+        XCTAssertTrue(controls.isAdjustingBlurOpacity)
+
+        canvas.selectedIDs = [rectItem.id]
+        let orphanHandle = canvas.annotations[0].selectionScaleHandleCenters[2]
+        let undoBeforeOrphanDrag = canvas.undoStack.count
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: orphanHandle), in: panel))
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(
+                    type: .leftMouseDragged,
+                    location: CGPoint(x: orphanHandle.x + 25, y: orphanHandle.y + 18)
+                ),
+                in: panel
+            )
+        )
+        XCTAssertTrue(view.hasActiveMouseInteraction)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeOrphanDrag + 1)
+
+        panel.resignKey()
+        XCTAssertFalse(view.hasActiveMouseInteraction)
+
+        canvas.moveSelectedAnnotations(by: CGSize(width: 8, height: 6))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeOrphanDrag + 2)
+
+        let secondHandle = canvas.annotations[0].selectionScaleHandleCenters[0]
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: secondHandle), in: panel))
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(
+                    type: .leftMouseDragged,
+                    location: CGPoint(x: secondHandle.x - 12, y: secondHandle.y - 10)
+                ),
+                in: panel
+            )
+        )
+        XCTAssertTrue(view.hasActiveMouseInteraction)
+        view.cancelActiveInteraction()
+        XCTAssertFalse(view.hasActiveMouseInteraction)
+    }
+
+    func testNonFiniteColorScaleAndLineWeightInputsPreserveFiniteSessionRoundTrip() {
+        let canvas = AnnotationCanvasState()
+        let rectItem = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 40, y: 50),
+            endPoint: CGPoint(x: 140, y: 120),
+            strokeColor: .red,
+            lineWeight: 5.0
+        )
+        let arrowItem = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 50, y: 160), CGPoint(x: 150, y: 200)],
+            startPoint: CGPoint(x: 50, y: 160),
+            endPoint: CGPoint(x: 150, y: 200),
+            strokeColor: .blue,
+            lineWeight: 5.0
+        )
+        let freeHandItem = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 60, y: 60), CGPoint(x: 95, y: 110), CGPoint(x: 130, y: 80)],
+            startPoint: CGPoint(x: 60, y: 60),
+            endPoint: CGPoint(x: 130, y: 80),
+            strokeColor: .green,
+            lineWeight: 5.0
+        )
+        let highlighterItem = AnnotationItem(
+            mode: .highlighter,
+            points: [CGPoint(x: 70, y: 230), CGPoint(x: 180, y: 230)],
+            startPoint: CGPoint(x: 70, y: 230),
+            endPoint: CGPoint(x: 180, y: 230),
+            strokeColor: PresentifyCore.RGBColor.yellow.withAlpha(0.42),
+            lineWeight: 16.0,
+            isHighlighter: true
+        )
+        let textItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 200, y: 80),
+            endPoint: CGPoint(x: 200, y: 80),
+            strokeColor: .white,
+            text: "Finite Check",
+            fontSize: 28.0
+        )
+        let blurItem = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 200, y: 150),
+            endPoint: CGPoint(x: 280, y: 220),
+            strokeColor: .red,
+            blurStyle: .gaussian,
+            blurOpacity: 0.55,
+            blurTintColor: .white
+        )
+
+        canvas.annotations = [rectItem, arrowItem, freeHandItem, highlighterItem, textItem, blurItem]
+        canvas.selectedIDs = Set(canvas.annotations.map(\.id))
+
+        let nonFiniteInitColor = PresentifyCore.RGBColor(red: .nan, green: .infinity, blue: -.infinity, alpha: .nan)
+        var mutatedNonFiniteColor = PresentifyCore.RGBColor.red
+        mutatedNonFiniteColor.red = .nan
+        mutatedNonFiniteColor.green = .infinity
+        mutatedNonFiniteColor.blue = -.infinity
+        mutatedNonFiniteColor.alpha = .nan
+        let badGradient = GradientPair(startColor: mutatedNonFiniteColor, endColor: nonFiniteInitColor)
+        canvas.applyColorUpdate(AnnotationColorUpdate(color: mutatedNonFiniteColor, gradient: badGradient))
+
+        for item in canvas.annotations {
+            let finiteRG = item.strokeColor.red.isFinite && item.strokeColor.green.isFinite
+            let finiteBA = item.strokeColor.blue.isFinite && item.strokeColor.alpha.isFinite
+            XCTAssertTrue(finiteRG && finiteBA)
+            if let grad = item.gradientPair {
+                let finiteStart = grad.startColor.red.isFinite && grad.startColor.green.isFinite
+                let finiteEnd = grad.endColor.blue.isFinite && grad.endColor.alpha.isFinite
+                XCTAssertTrue(finiteStart && finiteEnd)
+            }
+            if let tint = item.blurTintColor {
+                let finiteTintRG = tint.red.isFinite && tint.green.isFinite
+                let finiteTintBA = tint.blue.isFinite && tint.alpha.isFinite
+                XCTAssertTrue(finiteTintRG && finiteTintBA)
+            }
+        }
+
+        for badItem in [canvas.annotations[0], canvas.annotations[1], canvas.annotations[2]] {
+            canvas.applyCornerScale(
+                AnnotationCornerScaleRequest(
+                    anchor: AnnotationCornerScaleAnchor(initialItem: badItem, cornerIndex: 2),
+                    motion: AnnotationCornerScaleMotion(
+                        dragStartPoint: CGPoint(x: CGFloat.nan, y: 100),
+                        currentPoint: CGPoint(x: 200, y: CGFloat.infinity)
+                    )
+                )
+            )
+            canvas.applyCornerScale(
+                AnnotationCornerScaleRequest(
+                    anchor: AnnotationCornerScaleAnchor(initialItem: badItem, cornerIndex: 99),
+                    motion: AnnotationCornerScaleMotion(
+                        dragStartPoint: CGPoint(x: 100, y: 100),
+                        currentPoint: CGPoint(x: 160, y: 160)
+                    )
+                )
+            )
+            canvas.applyCornerScale(
+                AnnotationCornerScaleRequest(
+                    anchor: AnnotationCornerScaleAnchor(
+                        initialItem: badItem,
+                        cornerIndex: 2
+                    ),
+                    motion: AnnotationCornerScaleMotion(
+                        dragStartPoint: badItem.selectionScaleHandleCenters[2],
+                        currentPoint: CGPoint(x: 1_000_000, y: -1_000_000)
+                    )
+                ).withConstraint(.uniform)
+            )
+        }
+
+        for factor in [Double.nan, Double.infinity, -Double.infinity, 0.0, -4.0, 1_000_000.0] {
+            canvas.scaleSelectedAnnotations(by: factor)
+        }
+
+        for badWeight in [Double.nan, Double.infinity, -Double.infinity, -25.0, 999.0] {
+            canvas.updateSelectedStrokeLineWeight(badWeight)
+        }
+
+        for item in canvas.annotations {
+            let finiteStart = item.startPoint.x.isFinite && item.startPoint.y.isFinite
+            let finiteEnd = item.endPoint.x.isFinite && item.endPoint.y.isFinite
+            XCTAssertTrue(finiteStart && finiteEnd)
+            XCTAssertLessThanOrEqual(abs(item.startPoint.x), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.startPoint.y), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.endPoint.x), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.endPoint.y), 32_768.0)
+            for pt in item.points {
+                XCTAssertTrue(pt.x.isFinite && pt.y.isFinite)
+                XCTAssertLessThanOrEqual(abs(pt.x), 32_768.0)
+                XCTAssertLessThanOrEqual(abs(pt.y), 32_768.0)
+            }
+            XCTAssertTrue(item.lineWeight.isFinite)
+            if item.mode.supportsStrokeLineWeight {
+                XCTAssertGreaterThanOrEqual(item.lineWeight, 1.0)
+                XCTAssertLessThanOrEqual(item.lineWeight, 64.0)
+            }
+            XCTAssertTrue(item.fontSize.isFinite)
+        }
+
+        guard let exported = canvas.exportSessionData() else {
+            XCTFail("Expected session export data after non-finite stress")
+            return
+        }
+        let restored = AnnotationCanvasState()
+        XCTAssertTrue(restored.importSessionData(exported))
+        XCTAssertEqual(restored.annotations.count, canvas.annotations.count)
+    }
+
+    func testPostDrawHighlighterAndMismatchedSelectedStrokeWeightStepAcrossFullRangeWithUndo() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        let target = (window: window, view: view)
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+
+        var observedWeights: [Double] = []
+        view.onLineWeightChanged = { observedWeights.append($0) }
+
+        settings.minLineWeight = 2.0
+        settings.maxLineWeight = 24.0
+        settings.lineWeight = 6.0
+        settings.currentDrawMode = .highlighter
+
+        performMouseDrag(
+            StrokeDragSpec(
+                start: CGPoint(x: 60, y: 120),
+                end: CGPoint(x: 220, y: 120),
+                midpoints: [CGPoint(x: 140, y: 120)]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 1)
+        let highlighterID = canvas.annotations[0].id
+        XCTAssertEqual(canvas.selectedIDs, [highlighterID])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 14.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 14.0, accuracy: 1e-6)
+
+        controls.increaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 16.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 16.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 16.0, accuracy: 1e-6)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 14.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 14.0, accuracy: 1e-6)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 12.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 12.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 12.0, accuracy: 1e-6)
+
+        let mismatchedStroke = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 80, y: 180), CGPoint(x: 150, y: 210), CGPoint(x: 210, y: 185)],
+            startPoint: CGPoint(x: 80, y: 180),
+            endPoint: CGPoint(x: 210, y: 185),
+            strokeColor: .red,
+            lineWeight: 20.0
+        )
+        canvas.annotations = [mismatchedStroke]
+        canvas.selectedIDs = [mismatchedStroke.id]
+        settings.lineWeight = 4.0
+        XCTAssertEqual(controls.displayedLineWeight, 20.0, accuracy: 1e-6)
+
+        let undoBeforeStepUp = canvas.undoStack.count
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 22.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 22.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 22.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 22.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeStepUp + 1)
+
+        controls.increaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 24.0, accuracy: 1e-6)
+        controls.increaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 24.0, accuracy: 1e-6)
+
+        for _ in 0..<19 {
+            XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        }
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 24.0, accuracy: 1e-6)
+
+        let undoAtCeiling = canvas.undoStack.count
+        controls.increaseLineWeight()
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoAtCeiling)
+
+        for _ in 0..<31 {
+            XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        }
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 2.0, accuracy: 1e-6)
+
+        controls.decreaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 2.0, accuracy: 1e-6)
+
+        let undoAtFloor = canvas.undoStack.count
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        controls.decreaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoAtFloor)
+
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 2.0, accuracy: 1e-6)
+        canvas.redo()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 1.0, accuracy: 1e-6)
+    }
+
+    func testTouchDrawPostDrawAutoSelectionRecolorAndConsecutiveTouchStroke() {
+        let harness = makeCanvasHarness()
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+
+        settings.isTouchDrawActive = true
+        settings.currentDrawMode = .freeHand
+        controls.selectFavoriteColor(at: 0)
+
+        let makeSingleTouchEvent: (NSString, (NSTouch.Phase, NSPoint)) -> SyntheticTrackpadEvent = { id, sample in
+            let touch = SyntheticTouch()
+            touch.stubIdentity = id
+            touch.stubPhase = sample.0
+            touch.stubNormalizedPosition = sample.1
+            let event = SyntheticTrackpadEvent()
+            event.stubTouches = [touch]
+            return event
+        }
+
+        view.touchesBegan(with: makeSingleTouchEvent("touch-1", (.began, NSPoint(x: 0.20, y: 0.30))))
+        view.touchesMoved(with: makeSingleTouchEvent("touch-1", (.moved, NSPoint(x: 0.35, y: 0.40))))
+        view.touchesMoved(with: makeSingleTouchEvent("touch-1", (.moved, NSPoint(x: 0.50, y: 0.35))))
+        view.touchesEnded(with: makeSingleTouchEvent("touch-1", (.ended, NSPoint(x: 0.50, y: 0.35))))
+
+        XCTAssertEqual(canvas.annotations.count, 1)
+        let firstID = canvas.annotations[0].id
+        let firstSnapshot = canvas.annotations[0]
+        XCTAssertEqual(canvas.selectedIDs, [firstID])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+
+        controls.selectFavoriteColor(at: 2)
+        let expectedRecolor = settings.favColors[2]
+        XCTAssertEqual(canvas.annotations[0].strokeColor, expectedRecolor)
+
+        view.touchesBegan(with: makeSingleTouchEvent("touch-2", (.began, NSPoint(x: 0.20, y: 0.30))))
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
+        XCTAssertFalse(view.isPostDrawAutoSelection)
+        XCTAssertNotNil(canvas.activeDraft)
+
+        view.touchesMoved(with: makeSingleTouchEvent("touch-2", (.moved, NSPoint(x: 0.60, y: 0.65))))
+        view.touchesEnded(with: makeSingleTouchEvent("touch-2", (.ended, NSPoint(x: 0.72, y: 0.60))))
+
+        XCTAssertEqual(canvas.annotations.count, 2)
+        let secondID = canvas.annotations[1].id
+        XCTAssertNotEqual(firstID, secondID)
+        XCTAssertEqual(canvas.selectedIDs, [secondID])
+        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertEqual(canvas.annotations[0].startPoint, firstSnapshot.startPoint)
+        XCTAssertEqual(canvas.annotations[0].endPoint, firstSnapshot.endPoint)
+    }
+
+    func testDoubleClickInlineTextRecolorSingleUndoEscapeRestoreAndSingleRandomSample() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+
+        let item = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 80, y: 120),
+            endPoint: CGPoint(x: 80, y: 120),
+            strokeColor: .white,
+            text: "Original Label",
+            fontSize: 28.0
+        )
+        canvas.annotations = [item]
+        canvas.selectedIDs = [item.id]
+        let baselineUndo = canvas.undoStack.count
+
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: item.textCenter, clickCount: 2),
+                in: window
+            )
+        )
+        XCTAssertNotNil(view.activeTextField)
+        XCTAssertEqual(canvas.selectedIDs, [item.id])
+        XCTAssertEqual(canvas.activeInlineEditingID, item.id)
+
+        controls.selectFavoriteColor(at: 1)
+        XCTAssertEqual(view.activeTextField?.textColor, settings.activeStrokeColor.nsColor)
+        XCTAssertEqual(canvas.annotations[0].strokeColor, .white)
+        XCTAssertEqual(canvas.undoStack.count, baselineUndo)
+
+        controls.selectRandomColors()
+        let previewRandomColor = settings.activeGradient.startColor
+        XCTAssertEqual(view.activeTextField?.textColor, previewRandomColor.nsColor)
+        XCTAssertEqual(canvas.annotations[0].strokeColor, .white)
+        XCTAssertEqual(canvas.undoStack.count, baselineUndo)
+
+        CustomColorPanelBridge.shared.present(for: settings, canvasState: canvas)
+        sendColorPanelColor(PresentifyCore.RGBColor(red: 0.90, green: 0.25, blue: 0.20))
+        sendColorPanelColor(PresentifyCore.RGBColor(red: 0.20, green: 0.70, blue: 0.85))
+        XCTAssertEqual(view.activeTextField?.textColor, settings.activeStrokeColor.nsColor)
+        XCTAssertEqual(canvas.annotations[0].strokeColor, .white)
+        XCTAssertEqual(canvas.undoStack.count, baselineUndo)
+
+        view.activeTextField?.stringValue = "Discarded Draft"
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x35, modifiers: 0))
+        XCTAssertNil(view.activeTextField)
+        XCTAssertNil(canvas.activeInlineEditingID)
+        XCTAssertEqual(canvas.annotations[0].text, "Original Label")
+        XCTAssertEqual(canvas.annotations[0].strokeColor, .white)
+        XCTAssertEqual(canvas.undoStack.count, baselineUndo)
+
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: canvas.annotations[0].textCenter, clickCount: 2),
+                in: window
+            )
+        )
+        XCTAssertNotNil(view.activeTextField)
+
+        controls.selectRandomColors()
+        let committedRandomSample = settings.activeGradient.startColor
+        XCTAssertEqual(view.activeTextField?.textColor, committedRandomSample.nsColor)
+        XCTAssertEqual(canvas.undoStack.count, baselineUndo)
+
+        view.activeTextField?.stringValue = "Random Committed"
+        view.commitActiveTextEditing()
+        XCTAssertEqual(canvas.undoStack.count, baselineUndo + 1)
+        XCTAssertEqual(canvas.annotations[0].text, "Random Committed")
+        XCTAssertEqual(canvas.annotations[0].strokeColor, committedRandomSample)
+
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].text, "Original Label")
+        XCTAssertEqual(canvas.annotations[0].strokeColor, .white)
+
+        settings.currentDrawMode = .text
+        let undoBeforePanelCommit = canvas.undoStack.count
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: canvas.annotations[0].textCenter, clickCount: 2),
+                in: window
+            )
+        )
+        XCTAssertNotNil(view.activeTextField)
+
+        CustomColorPanelBridge.shared.present(for: settings, canvasState: canvas)
+        sendColorPanelColor(PresentifyCore.RGBColor(red: 0.85, green: 0.30, blue: 0.22))
+        sendColorPanelColor(PresentifyCore.RGBColor(red: 0.24, green: 0.55, blue: 0.92))
+        sendColorPanelColor(PresentifyCore.RGBColor(red: 0.15, green: 0.76, blue: 0.48))
+        let finalPanelColor = settings.activeStrokeColor
+        XCTAssertEqual(view.activeTextField?.textColor, finalPanelColor.nsColor)
+        XCTAssertEqual(canvas.annotations[0].strokeColor, .white)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforePanelCommit)
+
+        view.activeTextField?.stringValue = "Panel Committed"
+        view.commitActiveTextEditing()
+        CustomColorPanelBridge.shared.close()
+
+        XCTAssertEqual(canvas.undoStack.count, undoBeforePanelCommit + 1)
+        XCTAssertEqual(canvas.annotations[0].text, "Panel Committed")
+        XCTAssertEqual(canvas.annotations[0].strokeColor, finalPanelColor)
+
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].text, "Original Label")
+        XCTAssertEqual(canvas.annotations[0].strokeColor, .white)
+    }
+
+    func testScalingWideNearEdgeTextWithBlurRedactionClampsSessionCoordinatesAndRoundTrips() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let target = (window: window, view: view)
+
+        let wideText = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 200, y: 200),
+            endPoint: CGPoint(x: 200, y: 200),
+            strokeColor: .white,
+            text: String(repeating: "W", count: 800),
+            fontSize: 12.0
+        )
+        let nearEdgeText = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: -32_700, y: 32_700),
+            endPoint: CGPoint(x: -32_700, y: 32_700),
+            strokeColor: .yellow,
+            text: String(repeating: "M", count: 400),
+            fontSize: 14.0
+        )
+        let blurRedaction = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 40, y: 50),
+            endPoint: CGPoint(x: 180, y: 140),
+            strokeColor: .red,
+            blurStyle: .pixelate,
+            blurOpacity: 0.85,
+            blurTintColor: .blue
+        )
+
+        canvas.annotations = [wideText, nearEdgeText, blurRedaction]
+        canvas.selectedIDs = [wideText.id]
+
+        let topRightHandle = wideText.localTextScaleHandleCenters[2]
+        let textCenter = wideText.textCenter
+        let initialDist = hypot(topRightHandle.x - textCenter.x, topRightHandle.y - textCenter.y)
+        let farDragTarget = CGPoint(x: textCenter.x + initialDist * 20.0, y: textCenter.y + 400.0)
+        performMouseDrag(
+            StrokeDragSpec(start: topRightHandle, end: farDragTarget),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].fontSize, 200.0, accuracy: 1e-6)
+        XCTAssertLessThanOrEqual(abs(canvas.annotations[0].startPoint.x), 32_768.0)
+        XCTAssertLessThanOrEqual(abs(canvas.annotations[0].startPoint.y), 32_768.0)
+        XCTAssertLessThanOrEqual(abs(canvas.annotations[0].endPoint.x), 32_768.0)
+        XCTAssertLessThanOrEqual(abs(canvas.annotations[0].endPoint.y), 32_768.0)
+
+        canvas.selectedIDs = [nearEdgeText.id]
+        let magBegan = SyntheticTrackpadEvent()
+        magBegan.stubPhase = .began
+        magBegan.stubMagnification = 4.0
+        view.magnify(with: magBegan)
+
+        let magChanged = SyntheticTrackpadEvent()
+        magChanged.stubPhase = .changed
+        magChanged.stubMagnification = 16.0
+        view.magnify(with: magChanged)
+
+        let magEnded = SyntheticTrackpadEvent()
+        magEnded.stubPhase = .ended
+        magEnded.stubMagnification = 0.0
+        view.magnify(with: magEnded)
+
+        XCTAssertEqual(canvas.annotations[1].fontSize, 200.0, accuracy: 1e-6)
+        for item in canvas.annotations {
+            XCTAssertTrue(item.startPoint.x.isFinite && item.startPoint.y.isFinite)
+            XCTAssertTrue(item.endPoint.x.isFinite && item.endPoint.y.isFinite)
+            XCTAssertLessThanOrEqual(abs(item.startPoint.x), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.startPoint.y), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.endPoint.x), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.endPoint.y), 32_768.0)
+            for pt in item.points {
+                XCTAssertTrue(pt.x.isFinite && pt.y.isFinite)
+                XCTAssertLessThanOrEqual(abs(pt.x), 32_768.0)
+                XCTAssertLessThanOrEqual(abs(pt.y), 32_768.0)
+            }
+        }
+
+        guard let exported = canvas.exportSessionData() else {
+            XCTFail("Expected exported session data after scaling wide text to 200pt")
+            return
+        }
+        let restored = AnnotationCanvasState()
+        XCTAssertTrue(restored.importSessionData(exported))
+        XCTAssertEqual(restored.annotations.count, 3)
+
+        guard let restoredBlur = restored.annotations.first(where: { $0.id == blurRedaction.id }) else {
+            XCTFail("Expected blur redaction to survive session import")
+            return
+        }
+        XCTAssertEqual(restoredBlur.mode, .blur)
+        XCTAssertEqual(restoredBlur.boundingRect, blurRedaction.boundingRect)
+        XCTAssertEqual(restoredBlur.blurStyle, .pixelate)
+        XCTAssertEqual(restoredBlur.blurOpacity ?? 0.0, 0.85, accuracy: 1e-6)
+        XCTAssertEqual(restoredBlur.blurTintColor, .blue)
+    }
+
+    func testMixedSelectionSelectAllStepsStrokeAndHighlighterAcrossFullRangeWithUndo() {
+        let harness = makeCanvasHarness()
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+
+        var observedWeights: [Double] = []
+        view.onLineWeightChanged = { observedWeights.append($0) }
+
+        settings.minLineWeight = 2.0
+        settings.maxLineWeight = 24.0
+        settings.lineWeight = 6.0
+        settings.annotateFontSize = 24.0
+        settings.blurOpacity = 0.55
+
+        let heavyStroke = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 40, y: 60), CGPoint(x: 120, y: 90), CGPoint(x: 200, y: 70)],
+            startPoint: CGPoint(x: 40, y: 60),
+            endPoint: CGPoint(x: 200, y: 70),
+            strokeColor: .red,
+            lineWeight: 26.0
+        )
+        let highlighterStroke = AnnotationItem(
+            mode: .highlighter,
+            points: [CGPoint(x: 40, y: 130), CGPoint(x: 180, y: 130)],
+            startPoint: CGPoint(x: 40, y: 130),
+            endPoint: CGPoint(x: 180, y: 130),
+            strokeColor: RGBColor.yellow.withAlpha(0.42),
+            lineWeight: 14.0,
+            isHighlighter: true
+        )
+        let textNote = AnnotationItem(
+            mode: .text,
+            points: [CGPoint(x: 50, y: 200)],
+            startPoint: CGPoint(x: 50, y: 200),
+            endPoint: CGPoint(x: 50, y: 200),
+            strokeColor: .blue,
+            lineWeight: 2.0,
+            text: "Mixed Selection",
+            fontSize: 30.0
+        )
+        let blurRegion = AnnotationItem(
+            mode: .blur,
+            startPoint: CGPoint(x: 220, y: 60),
+            endPoint: CGPoint(x: 340, y: 160),
+            strokeColor: .green,
+            lineWeight: 6.0,
+            blurStyle: .gaussian,
+            blurOpacity: 0.45
+        )
+        canvas.annotations = [heavyStroke, highlighterStroke, textNote, blurRegion]
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x00, modifiers: KeyBinding.commandMask))
+        XCTAssertEqual(canvas.selectedIDs, Set(canvas.annotations.map(\.id)))
+        XCTAssertFalse(controls.isAdjustingTextSize)
+        XCTAssertFalse(controls.isAdjustingBlurOpacity)
+        XCTAssertEqual(controls.displayedLineWeight, 26.0, accuracy: 1e-6)
+
+        let undoBeforeFirstPlus = canvas.undoStack.count
+        controls.increaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 28.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 16.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[2].fontSize, 30.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[3].effectiveBlurOpacity, 0.45, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 28.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 8.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeFirstPlus + 1)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 30.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 18.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 30.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 30.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 10.0, accuracy: 1e-6)
+
+        controls.decreaseLineWeight()
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 28.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 16.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 28.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 8.0, accuracy: 1e-6)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 14.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 6.0, accuracy: 1e-6)
+
+        for _ in 0..<10 {
+            controls.increaseLineWeight()
+        }
+        for _ in 0..<9 {
+            XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        }
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 52.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 64.0, accuracy: 1e-6)
+
+        for _ in 0..<3 {
+            controls.increaseLineWeight()
+            XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        }
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 64.0, accuracy: 1e-6)
+
+        let undoAtCeiling = canvas.undoStack.count
+        controls.increaseLineWeight()
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 64.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoAtCeiling)
+
+        for _ in 0..<16 {
+            XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        }
+        for _ in 0..<15 {
+            controls.decreaseLineWeight()
+        }
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 2.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 2.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 2.0, accuracy: 1e-6)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 1.0, accuracy: 1e-6)
+
+        let undoAtFloor = canvas.undoStack.count
+        controls.decreaseLineWeight()
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoAtFloor)
+
+        canvas.undo()
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 2.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 2.0, accuracy: 1e-6)
+
+        canvas.redo()
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x00, modifiers: KeyBinding.commandMask))
+        XCTAssertEqual(controls.displayedLineWeight, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[2].fontSize, 30.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[3].effectiveBlurOpacity, 0.45, accuracy: 1e-6)
+
+        let soloHighlighter = AnnotationItem(
+            mode: .highlighter,
+            points: [CGPoint(x: 40, y: 240), CGPoint(x: 190, y: 240)],
+            startPoint: CGPoint(x: 40, y: 240),
+            endPoint: CGPoint(x: 190, y: 240),
+            strokeColor: RGBColor.yellow.withAlpha(0.42),
+            lineWeight: 14.0,
+            isHighlighter: true
+        )
+        canvas.annotations = [textNote, soloHighlighter, blurRegion]
+        settings.lineWeight = 6.0
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x00, modifiers: KeyBinding.commandMask))
+        XCTAssertEqual(controls.displayedLineWeight, 14.0, accuracy: 1e-6)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 16.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 16.0, accuracy: 1e-6)
+        XCTAssertEqual(observedWeights.last ?? -1.0, 16.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.lineWeight, 8.0, accuracy: 1e-6)
+
+        controls.increaseLineWeight()
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 18.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 18.0, accuracy: 1e-6)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x06, modifiers: KeyBinding.commandMask))
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 16.0, accuracy: 1e-6)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x06, modifiers: KeyBinding.commandMask))
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 14.0, accuracy: 1e-6)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x06, modifiers: KeyBinding.commandMask | KeyBinding.shiftMask))
+        XCTAssertEqual(canvas.annotations[1].lineWeight, 16.0, accuracy: 1e-6)
     }
 }

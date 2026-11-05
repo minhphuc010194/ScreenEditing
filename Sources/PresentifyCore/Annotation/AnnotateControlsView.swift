@@ -228,19 +228,24 @@ public final class CustomColorPanelBridge: NSObject {
     public static let shared = CustomColorPanelBridge()
     public private(set) var activeTarget: ColorPanelTarget = .stroke
     private weak var activeSettings: AppSettings?
+    private weak var activeCanvasState: AnnotationCanvasState?
+    private var sessionCoalescingToken = UUID()
     private var isUpdatingPanelColor = false
 
-    public func present(for settings: AppSettings) {
+    public func present(for settings: AppSettings, canvasState: AnnotationCanvasState? = nil) {
+        activeCanvasState = canvasState
         presentPanel(for: settings, target: .stroke)
     }
 
-    public func presentForBlurTint(for settings: AppSettings) {
+    public func presentForBlurTint(for settings: AppSettings, canvasState: AnnotationCanvasState? = nil) {
+        activeCanvasState = canvasState
         presentPanel(for: settings, target: .blurTint)
     }
 
     private func presentPanel(for settings: AppSettings, target: ColorPanelTarget) {
         activeSettings = settings
         activeTarget = target
+        sessionCoalescingToken = UUID()
         let panel = NSColorPanel.shared
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 3)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -256,11 +261,12 @@ public final class CustomColorPanelBridge: NSObject {
         isUpdatingPanelColor = false
         panel.setTarget(self)
         panel.setAction(#selector(colorPanelDidChange(_:)))
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp?.activate(ignoringOtherApps: true)
         panel.orderFrontRegardless()
     }
 
     public func close() {
+        activeCanvasState = nil
         if NSColorPanel.sharedColorPanelExists {
             NSColorPanel.shared.setTarget(nil)
             NSColorPanel.shared.setAction(nil)
@@ -268,13 +274,30 @@ public final class CustomColorPanelBridge: NSObject {
         }
     }
 
-    @objc private func colorPanelDidChange(_ sender: NSColorPanel) {
+    @objc func colorPanelDidChange(_ sender: NSColorPanel) {
         guard !isUpdatingPanelColor, let settings = activeSettings else { return }
         let chosenColor = RGBColor(nsColor: sender.color)
         switch activeTarget {
         case .stroke:
+            activeCanvasState?.applyColorUpdate(
+                AnnotationColorUpdate(
+                    color: chosenColor,
+                    gradient: nil,
+                    coalescingToken: sessionCoalescingToken
+                )
+            )
             settings.setCustomStrokeColor(chosenColor)
+            if activeCanvasState?.hasSelectedBlurAnnotations == true {
+                settings.setCustomBlurTintColor(chosenColor)
+            }
         case .blurTint:
+            activeCanvasState?.applyColorUpdate(
+                AnnotationColorUpdate(
+                    color: chosenColor,
+                    gradient: nil,
+                    coalescingToken: sessionCoalescingToken
+                )
+            )
             settings.setCustomBlurTintColor(chosenColor)
         }
     }
@@ -327,6 +350,16 @@ public struct AnnotateControlsView: View {
         return settings.currentDrawMode == .text
     }
 
+    public var isAdjustingBlurOpacity: Bool {
+        if let canvasState {
+            let selectedItems = canvasState.annotations.filter { canvasState.selectedIDs.contains($0.id) }
+            if !selectedItems.isEmpty {
+                return selectedItems.allSatisfy { $0.mode == .blur }
+            }
+        }
+        return settings.currentDrawMode == .blur
+    }
+
     public var displayedTextFontSize: Double {
         if let canvasState {
             let selectedText = canvasState.annotations.first { item in
@@ -341,12 +374,93 @@ public struct AnnotateControlsView: View {
         return rawSetting.isFinite ? min(max(rawSetting, 10.0), 96.0) : 24.0
     }
 
+    public var displayedLineWeight: Double {
+        if let canvasState {
+            let selectedStroke = canvasState.annotations.first { item in
+                let isSelected = canvasState.selectedIDs.contains(item.id)
+                return isSelected && item.mode.supportsStrokeLineWeight
+            }
+            if let selectedStroke {
+                let rawWeight = selectedStroke.lineWeight
+                return rawWeight.isFinite ? min(max(rawWeight, 1.0), 64.0) : 6.0
+            }
+        }
+        let rawSetting = settings.lineWeight
+        return rawSetting.isFinite ? min(max(rawSetting, 1.0), 64.0) : 6.0
+    }
+
     public func decreaseTextSize() {
         adjustTextSize(by: -2.0)
     }
 
     public func increaseTextSize() {
         adjustTextSize(by: 2.0)
+    }
+
+    public func decreaseLineWeight() {
+        adjustStrokeLineWeight(by: -2.0)
+    }
+
+    public func increaseLineWeight() {
+        adjustStrokeLineWeight(by: 2.0)
+    }
+
+    public func selectFavoriteColor(at index: Int) {
+        settings.selectFavoriteColor(index: index)
+        let resolvedColor = settings.activeStrokeColor
+        let resolvedGradient = settings.activeStrokeGradient
+        canvasState?.applyColorUpdate(
+            AnnotationColorUpdate(color: resolvedColor, gradient: resolvedGradient)
+        )
+        let hasSelectedBlur = canvasState?.hasSelectedBlurAnnotations == true
+        let isActiveCustomBlurTool = settings.currentDrawMode == .blur && settings.blurUseCustomColor
+        if hasSelectedBlur || isActiveCustomBlurTool {
+            if hasSelectedBlur {
+                settings.blurUseCustomColor = true
+            }
+            settings.blurCustomColor = resolvedColor
+        }
+    }
+
+    public func selectRandomColors() {
+        settings.selectRandomColors()
+        let resolvedColor = settings.useRandomColors ? settings.activeGradient.startColor : settings.activeStrokeColor
+        let resolvedGradient = settings.activeStrokeGradient
+        canvasState?.applyColorUpdate(
+            AnnotationColorUpdate(color: resolvedColor, gradient: resolvedGradient)
+        )
+        if canvasState?.hasSelectedBlurAnnotations == true {
+            settings.blurUseCustomColor = true
+            settings.blurCustomColor = resolvedColor
+        }
+    }
+
+    private func adjustStrokeLineWeight(by step: Double) {
+        let safeStep = step.isFinite ? step : 0.0
+        let selectedItems = canvasState?.annotations.filter { item in
+            canvasState?.selectedIDs.contains(item.id) == true
+        } ?? []
+        let hasSelectedStroke = selectedItems.contains { $0.mode.supportsStrokeLineWeight }
+        if hasSelectedStroke {
+            guard let updated = canvasState?.adjustSelectedStrokeLineWeight(by: safeStep) else { return }
+            let safeUpdated = updated.isFinite ? min(max(updated, 1.0), 64.0) : 6.0
+            let isPureStrokeSelection = selectedItems.allSatisfy { $0.mode.supportsStrokeLineWeight }
+            if isPureStrokeSelection {
+                let safeMin = settings.minLineWeight.isFinite ? settings.minLineWeight : 2.0
+                let safeMax = settings.maxLineWeight.isFinite ? max(settings.maxLineWeight, safeMin) : max(24.0, safeMin)
+                settings.lineWeight = min(max(safeUpdated, safeMin), safeMax)
+            } else if safeStep < 0 {
+                settings.decreaseLineWeight(step: abs(safeStep))
+            } else if safeStep > 0 {
+                settings.increaseLineWeight(step: safeStep)
+            }
+            return
+        }
+        if safeStep < 0 {
+            settings.decreaseLineWeight(step: abs(safeStep))
+        } else if safeStep > 0 {
+            settings.increaseLineWeight(step: safeStep)
+        }
     }
 
     private func adjustTextSize(by step: Double) {
@@ -415,12 +529,7 @@ public struct AnnotateControlsView: View {
         HStack(spacing: 6) {
             ForEach(Array(settings.favColors.prefix(5).enumerated()), id: \.offset) { index, color in
                 Button {
-                    settings.selectFavoriteColor(index: index)
-                    let shouldSyncBlurTint = settings.currentDrawMode == .blur && settings.blurUseCustomColor
-                    if shouldSyncBlurTint {
-                        settings.blurCustomColor = color
-                        canvasState?.updateSelectedBlurTintColor(settings.activeBlurTintColor)
-                    }
+                    selectFavoriteColor(at: index)
                 } label: {
                     Circle()
                         .fill(color.swiftUIColor)
@@ -440,7 +549,7 @@ public struct AnnotateControlsView: View {
             }
 
             Button {
-                settings.selectRandomColors()
+                selectRandomColors()
             } label: {
                 Circle()
                     .fill(
@@ -492,7 +601,7 @@ public struct AnnotateControlsView: View {
     }
 
     private func openCustomColorPanel() {
-        CustomColorPanelBridge.shared.present(for: settings)
+        CustomColorPanelBridge.shared.present(for: settings, canvasState: canvasState)
     }
 
     private var drawingToolsSection: some View {
@@ -550,7 +659,7 @@ public struct AnnotateControlsView: View {
                 .contentShape(Rectangle())
                 .help("Increase Text Size (])")
             }
-        } else if settings.currentDrawMode == .blur {
+        } else if isAdjustingBlurOpacity {
             let safeOpacity = settings.blurOpacity.isFinite ? min(max(settings.blurOpacity, 0.10), 1.00) : 0.55
             HStack(spacing: 4) {
                 Button {
@@ -601,7 +710,7 @@ public struct AnnotateControlsView: View {
 
                 if settings.blurUseCustomColor {
                     Button {
-                        CustomColorPanelBridge.shared.presentForBlurTint(for: settings)
+                        CustomColorPanelBridge.shared.presentForBlurTint(for: settings, canvasState: canvasState)
                     } label: {
                         Circle()
                             .fill(settings.blurCustomColor.swiftUIColor)
@@ -617,10 +726,11 @@ public struct AnnotateControlsView: View {
                 }
             }
         } else {
-            let safeWeight = settings.lineWeight.isFinite ? min(max(settings.lineWeight, 1.0), 64.0) : 6.0
+            let rawDisplayWeight = displayedLineWeight
+            let safeWeight = rawDisplayWeight.isFinite ? min(max(rawDisplayWeight, 1.0), 64.0) : 6.0
             HStack(spacing: 4) {
                 Button {
-                    settings.decreaseLineWeight()
+                    decreaseLineWeight()
                 } label: {
                     Image(systemName: "minus.circle")
                         .frame(width: 26, height: 26)
@@ -635,7 +745,7 @@ public struct AnnotateControlsView: View {
                     .frame(width: 34)
 
                 Button {
-                    settings.increaseLineWeight()
+                    increaseLineWeight()
                 } label: {
                     Image(systemName: "plus.circle")
                         .frame(width: 26, height: 26)
