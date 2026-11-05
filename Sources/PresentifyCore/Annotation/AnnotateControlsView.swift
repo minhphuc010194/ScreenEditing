@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 public final class FloatingControlPanel: NSPanel {
@@ -289,6 +290,8 @@ public struct AnnotateControlsView: View {
     public var onToggleShortcuts: () -> Void
     public var onClose: () -> Void
     public var onDragToolbar: (CGSize) -> Void
+    public var onTextSizeChanged: (Double) -> Void
+    @State private var canvasRevision: UInt64 = 0
 
     public init(
         settings: AppSettings,
@@ -299,7 +302,8 @@ public struct AnnotateControlsView: View {
         onClear: @escaping () -> Void = {},
         onToggleShortcuts: @escaping () -> Void = {},
         onClose: @escaping () -> Void = {},
-        onDragToolbar: @escaping (CGSize) -> Void = { _ in }
+        onDragToolbar: @escaping (CGSize) -> Void = { _ in },
+        onTextSizeChanged: @escaping (Double) -> Void = { _ in }
     ) {
         self.settings = settings
         self.canvasState = canvasState
@@ -310,12 +314,62 @@ public struct AnnotateControlsView: View {
         self.onToggleShortcuts = onToggleShortcuts
         self.onClose = onClose
         self.onDragToolbar = onDragToolbar
+        self.onTextSizeChanged = onTextSizeChanged
+    }
+
+    public var isAdjustingTextSize: Bool {
+        if let canvasState {
+            let selectedItems = canvasState.annotations.filter { canvasState.selectedIDs.contains($0.id) }
+            if !selectedItems.isEmpty {
+                return selectedItems.allSatisfy { $0.mode == .text }
+            }
+        }
+        return settings.currentDrawMode == .text
+    }
+
+    public var displayedTextFontSize: Double {
+        if let canvasState {
+            let selectedText = canvasState.annotations.first { item in
+                let isSelected = canvasState.selectedIDs.contains(item.id)
+                return isSelected && item.mode == .text
+            }
+            if let selectedText {
+                return AnnotationItem.sanitizeFontSize(selectedText.fontSize)
+            }
+        }
+        let rawSetting = settings.annotateFontSize
+        return rawSetting.isFinite ? min(max(rawSetting, 10.0), 96.0) : 24.0
+    }
+
+    public func decreaseTextSize() {
+        adjustTextSize(by: -2.0)
+    }
+
+    public func increaseTextSize() {
+        adjustTextSize(by: 2.0)
+    }
+
+    private func adjustTextSize(by step: Double) {
+        let safeStep = step.isFinite ? step : 0.0
+        if let updated = canvasState?.adjustSelectedTextFontSize(by: safeStep) {
+            let safeUpdated = AnnotationItem.sanitizeFontSize(updated)
+            settings.annotateFontSize = min(max(safeUpdated, 10.0), 96.0)
+            onTextSizeChanged(safeUpdated)
+        } else {
+            let currentSize = settings.annotateFontSize
+            let safeBase = currentSize.isFinite ? currentSize : 24.0
+            let nextSize = min(max(safeBase + safeStep, 10.0), 96.0)
+            settings.annotateFontSize = nextSize
+            onTextSizeChanged(nextSize)
+        }
     }
 
     public var body: some View {
         let layout = settings.annotateControlsVertical
             ? AnyLayout(VStackLayout(spacing: 8))
             : AnyLayout(HStackLayout(spacing: 8))
+        let canvasChangePublisher = canvasState.map { $0.objectWillChange.eraseToAnyPublisher() }
+            ?? Empty<ObservableObjectPublisher.Output, Never>().eraseToAnyPublisher()
 
         layout {
             dragHandleSection
@@ -335,6 +389,9 @@ public struct AnnotateControlsView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(SettingsView.themeLightBlue.opacity(0.32), lineWidth: 1)
         )
+        .onReceive(canvasChangePublisher) { _ in
+            canvasRevision &+= 1
+        }
     }
 
     private var dragHandleSection: some View {
@@ -463,7 +520,38 @@ public struct AnnotateControlsView: View {
 
     @ViewBuilder
     private var lineWeightSection: some View {
-        if settings.currentDrawMode == .blur {
+        let _ = canvasRevision
+        if isAdjustingTextSize {
+            let safeDisplaySize = AnnotationItem.sanitizeFontSize(displayedTextFontSize)
+            HStack(spacing: 4) {
+                Button {
+                    decreaseTextSize()
+                } label: {
+                    Image(systemName: "minus.circle")
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .help("Decrease Text Size ([)")
+
+                Text("\(Int(safeDisplaySize.rounded()))pt")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .frame(width: 38)
+
+                Button {
+                    increaseTextSize()
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .help("Increase Text Size (])")
+            }
+        } else if settings.currentDrawMode == .blur {
+            let safeOpacity = settings.blurOpacity.isFinite ? min(max(settings.blurOpacity, 0.10), 1.00) : 0.55
             HStack(spacing: 4) {
                 Button {
                     settings.decreaseBlurOpacity()
@@ -477,7 +565,7 @@ public struct AnnotateControlsView: View {
                 .contentShape(Rectangle())
                 .help("Decrease Blur Opacity ([)")
 
-                Text("\(Int((settings.blurOpacity * 100.0).rounded()))%")
+                Text("\(Int((safeOpacity * 100.0).rounded()))%")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .frame(width: 38)
 
@@ -529,6 +617,7 @@ public struct AnnotateControlsView: View {
                 }
             }
         } else {
+            let safeWeight = settings.lineWeight.isFinite ? min(max(settings.lineWeight, 1.0), 64.0) : 6.0
             HStack(spacing: 4) {
                 Button {
                     settings.decreaseLineWeight()
@@ -541,7 +630,7 @@ public struct AnnotateControlsView: View {
                 .contentShape(Rectangle())
                 .help("Decrease Line Weight ([)")
 
-                Text("\(Int(settings.lineWeight))pt")
+                Text("\(Int(safeWeight.rounded()))pt")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .frame(width: 34)
 

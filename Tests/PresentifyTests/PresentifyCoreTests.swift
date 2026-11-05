@@ -2287,4 +2287,1643 @@ final class PresentifyCoreTests: XCTestCase {
         }
         return maxRun
     }
+
+    private struct SyntheticMouseSpec {
+        var type: NSEvent.EventType
+        var location: CGPoint
+        var modifiers: NSEvent.ModifierFlags = []
+        var clickCount: Int = 1
+    }
+
+    private final class SyntheticTrackpadEvent: NSEvent {
+        var stubMagnification: CGFloat = 0
+        var stubRotation: Float = 0
+        var stubPhase: NSEvent.Phase = []
+
+        override var magnification: CGFloat { stubMagnification }
+        override var rotation: Float { stubRotation }
+        override var phase: NSEvent.Phase { stubPhase }
+    }
+
+    private func makeMouseEvent(_ spec: SyntheticMouseSpec, in window: NSWindow?) -> NSEvent {
+        guard let event = NSEvent.mouseEvent(
+            with: spec.type,
+            location: spec.location,
+            modifierFlags: spec.modifiers,
+            timestamp: 1.0,
+            windowNumber: window?.windowNumber ?? 0,
+            context: nil,
+            eventNumber: 1,
+            clickCount: spec.clickCount,
+            pressure: 1.0
+        ) else {
+            fatalError("Failed to create synthetic mouse event")
+        }
+        return event
+    }
+
+    private func makeCanvasHarness() -> (window: NSWindow, view: AnnotateCanvasView, canvas: AnnotationCanvasState, settings: AppSettings) {
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateToolIndicator = false
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let frame = NSRect(x: 0, y: 0, width: 420, height: 360)
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let view = AnnotateCanvasView(
+            frame: frame,
+            canvasState: canvas,
+            settings: settings,
+            shortcutManager: shortcuts
+        )
+        window.contentView = view
+        return (window, view, canvas, settings)
+    }
+
+    func testDirectMouseDragMovesTextAndSelectedShapesWithoutCommandAndCoalescesUndo() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+
+        settings.currentDrawMode = .text
+        let createPoint = CGPoint(x: 80, y: 120)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: createPoint), in: window))
+        XCTAssertNotNil(view.activeTextField)
+        view.activeTextField?.stringValue = "Draggable Note"
+        view.commitActiveTextEditing()
+
+        XCTAssertEqual(canvas.annotations.count, 1)
+        let textID = canvas.annotations[0].id
+        let initialCenter = canvas.annotations[0].textCenter
+        let undoCountAfterCreate = canvas.undoStack.count
+
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: initialCenter), in: window))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: initialCenter), in: window))
+        XCTAssertEqual(canvas.selectedIDs, [textID])
+        XCTAssertNil(view.activeTextField)
+        XCTAssertEqual(canvas.undoStack.count, undoCountAfterCreate)
+
+        let originalOrigin = canvas.annotations[0].startPoint
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: initialCenter), in: window))
+        for step in 1...5 {
+            let dragPoint = CGPoint(
+                x: initialCenter.x + CGFloat(step * 12),
+                y: initialCenter.y + CGFloat(step * 6)
+            )
+            view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: dragPoint), in: window))
+        }
+        let finalDragPoint = CGPoint(x: initialCenter.x + 60, y: initialCenter.y + 30)
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: finalDragPoint), in: window))
+
+        XCTAssertNil(view.activeTextField)
+        XCTAssertEqual(canvas.annotations.count, 1)
+        XCTAssertEqual(canvas.annotations[0].startPoint.x, originalOrigin.x + 60, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].startPoint.y, originalOrigin.y + 30, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint, canvas.annotations[0].startPoint)
+        XCTAssertEqual(canvas.annotations[0].points, [canvas.annotations[0].startPoint])
+        XCTAssertEqual(canvas.undoStack.count, undoCountAfterCreate + 1)
+
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].startPoint.x, originalOrigin.x, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].startPoint.y, originalOrigin.y, accuracy: 1e-6)
+        canvas.redo()
+        XCTAssertEqual(canvas.annotations[0].startPoint.x, originalOrigin.x + 60, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].startPoint.y, originalOrigin.y + 30, accuracy: 1e-6)
+
+        settings.currentDrawMode = .rectangle
+        let rectItem = AnnotationItem(
+            mode: .rectangle,
+            points: [CGPoint(x: 240, y: 200), CGPoint(x: 320, y: 260)],
+            startPoint: CGPoint(x: 240, y: 200),
+            endPoint: CGPoint(x: 320, y: 260),
+            isFilled: true,
+            strokeColor: .green,
+            lineWeight: 4.0
+        )
+        canvas.annotations.append(rectItem)
+
+        let rectHitPoint = CGPoint(x: 280, y: 230)
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: rectHitPoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: rectHitPoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        XCTAssertEqual(canvas.selectedIDs, [rectItem.id])
+
+        let undoBeforeRectDrag = canvas.undoStack.count
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: rectHitPoint), in: window))
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: CGPoint(x: 295, y: 240)),
+                in: window
+            )
+        )
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: CGPoint(x: 310, y: 250)),
+                in: window
+            )
+        )
+        view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: CGPoint(x: 310, y: 250)),
+                in: window
+            )
+        )
+        XCTAssertNil(canvas.activeDraft)
+        XCTAssertEqual(canvas.annotations.count, 2)
+        XCTAssertEqual(canvas.annotations[1].startPoint, CGPoint(x: 270, y: 220))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeRectDrag + 1)
+
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: CGPoint(x: 250, y: 200), modifiers: [.command]),
+                in: window
+            )
+        )
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: CGPoint(x: 360, y: 300), modifiers: [.command]),
+                in: window
+            )
+        )
+        view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: CGPoint(x: 360, y: 300), modifiers: [.command]),
+                in: window
+            )
+        )
+        XCTAssertEqual(canvas.selectedIDs, [rectItem.id])
+
+        let undoBeforeStandalone = canvas.undoStack.count
+        canvas.moveSelectedAnnotations(by: CGSize(width: 5, height: -5))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeStandalone + 1)
+    }
+
+    func testDoubleClickTextOpensPrefilledInlineEditorAndPreservesMetadataOnCommit() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+
+        settings.currentDrawMode = .text
+        settings.annotateFontSize = 18.0
+        settings.selectFavoriteColor(index: 4)
+
+        let customID = UUID()
+        let origin = CGPoint(x: 90, y: 110)
+        let savedRotation = Double.pi / 6.0
+        let initialItem = AnnotationItem(
+            id: customID,
+            mode: .text,
+            points: [origin],
+            startPoint: origin,
+            endPoint: origin,
+            strokeColor: .orange,
+            lineWeight: 2.0,
+            text: "Original Text",
+            fontName: AnnotateFontOption.menlo.fontName,
+            fontSize: 38.0,
+            rotationRadians: savedRotation
+        )
+        canvas.annotations = [initialItem]
+
+        let centerHit = initialItem.textCenter
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: centerHit, clickCount: 2),
+                in: window
+            )
+        )
+        guard let activeField = view.activeTextField else {
+            XCTFail("Expected activeTextField on double-click")
+            return
+        }
+        XCTAssertEqual(view.editingAnnotationID, customID)
+        XCTAssertEqual(canvas.selectedIDs, [customID])
+        XCTAssertEqual(activeField.stringValue, "Original Text")
+        XCTAssertEqual(activeField.textColor, RGBColor.orange.nsColor)
+        XCTAssertEqual(Double(activeField.font?.pointSize ?? 0), 38.0, accuracy: 1e-6)
+        XCTAssertEqual(activeField.frame.origin, origin)
+
+        activeField.stringValue = "Updated Copy"
+        view.commitActiveTextEditing()
+
+        XCTAssertEqual(canvas.annotations.count, 1)
+        let updated = canvas.annotations[0]
+        XCTAssertEqual(updated.id, customID)
+        XCTAssertEqual(updated.text, "Updated Copy")
+        XCTAssertEqual(updated.strokeColor, .orange)
+        XCTAssertEqual(updated.fontName, AnnotateFontOption.menlo.fontName)
+        XCTAssertEqual(updated.fontSize, 38.0, accuracy: 1e-6)
+        XCTAssertEqual(updated.startPoint, origin)
+        XCTAssertEqual(updated.rotationRadians, savedRotation, accuracy: 1e-9)
+
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: updated.textCenter, clickCount: 2),
+                in: window
+            )
+        )
+        XCTAssertNotNil(view.activeTextField)
+        settings.setCustomStrokeColor(.green)
+        view.activeTextField?.stringValue = "Green Copy"
+        view.commitActiveTextEditing()
+
+        XCTAssertEqual(canvas.annotations.count, 1)
+        XCTAssertEqual(canvas.annotations[0].id, customID)
+        XCTAssertEqual(canvas.annotations[0].text, "Green Copy")
+        XCTAssertEqual(canvas.annotations[0].strokeColor, .green)
+        XCTAssertEqual(canvas.annotations[0].fontSize, 38.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, savedRotation, accuracy: 1e-9)
+    }
+
+    func testTextLayoutBoundsCornerScaleHandlesClampCenterPreservationAndPinchZoom() {
+        let smallText = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 40, y: 50),
+            endPoint: CGPoint(x: 40, y: 50),
+            strokeColor: .white,
+            text: "Scale Sample",
+            fontSize: 16.0
+        )
+        let largeText = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 40, y: 50),
+            endPoint: CGPoint(x: 40, y: 50),
+            strokeColor: .white,
+            text: "Scale Sample",
+            fontSize: 48.0
+        )
+        let emptyText = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 15, y: 25),
+            endPoint: CGPoint(x: 15, y: 25),
+            strokeColor: .white,
+            text: "",
+            fontSize: 12.0
+        )
+        XCTAssertGreaterThan(largeText.textLayoutRect.width, smallText.textLayoutRect.width * 2.2)
+        XCTAssertGreaterThan(largeText.textLayoutRect.height, smallText.textLayoutRect.height * 2.2)
+        XCTAssertGreaterThanOrEqual(emptyText.textLayoutRect.width, 24.0)
+        XCTAssertGreaterThanOrEqual(emptyText.textLayoutRect.height, 20.0)
+        XCTAssertEqual(emptyText.boundingRect, emptyText.textLayoutRect)
+
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+
+        let item = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 150, y: 150),
+            endPoint: CGPoint(x: 150, y: 150),
+            strokeColor: .white,
+            text: "Corner Scale",
+            fontSize: 24.0
+        )
+        canvas.annotations = [item]
+        canvas.selectedIDs = [item.id]
+
+        let initialCenter = item.textCenter
+        let cornerHandle = item.worldTextScaleHandleCenters[2]
+        let vecX = cornerHandle.x - initialCenter.x
+        let vecY = cornerHandle.y - initialCenter.y
+        let undoBeforeScale = canvas.undoStack.count
+
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: cornerHandle), in: window))
+        let midHandle = CGPoint(x: initialCenter.x + vecX * 1.5, y: initialCenter.y + vecY * 1.5)
+        let doubleHandle = CGPoint(x: initialCenter.x + vecX * 2.0, y: initialCenter.y + vecY * 2.0)
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: midHandle), in: window))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: doubleHandle), in: window))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: doubleHandle), in: window))
+
+        XCTAssertEqual(canvas.annotations[0].fontSize, 48.0, accuracy: 0.25)
+        XCTAssertEqual(canvas.annotations[0].textCenter.x, initialCenter.x, accuracy: 1.0)
+        XCTAssertEqual(canvas.annotations[0].textCenter.y, initialCenter.y, accuracy: 1.0)
+        XCTAssertEqual(canvas.annotations[0].endPoint, canvas.annotations[0].startPoint)
+        XCTAssertEqual(canvas.annotations[0].points, [canvas.annotations[0].startPoint])
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeScale + 1)
+
+        let shrinkHandle = canvas.annotations[0].worldTextScaleHandleCenters[2]
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: shrinkHandle), in: window))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: initialCenter), in: window))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: initialCenter), in: window))
+        XCTAssertEqual(canvas.annotations[0].fontSize, 8.0, accuracy: 1e-6)
+
+        let growHandle = canvas.annotations[0].worldTextScaleHandleCenters[2]
+        let farOut = CGPoint(x: initialCenter.x + 4000, y: initialCenter.y + 4000)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: growHandle), in: window))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: farOut), in: window))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: farOut), in: window))
+        XCTAssertEqual(canvas.annotations[0].fontSize, 200.0, accuracy: 1e-6)
+
+        canvas.scaleTextAnnotation(item.id, toFontSize: 30.0)
+        let undoBeforePinch = canvas.undoStack.count
+        let pinchBegan = SyntheticTrackpadEvent()
+        pinchBegan.stubPhase = .began
+        pinchBegan.stubMagnification = 0.20
+        let pinchChanged = SyntheticTrackpadEvent()
+        pinchChanged.stubPhase = .changed
+        pinchChanged.stubMagnification = 0.25
+        let pinchEnded = SyntheticTrackpadEvent()
+        pinchEnded.stubPhase = .ended
+        pinchEnded.stubMagnification = 0.0
+
+        view.magnify(with: pinchBegan)
+        view.magnify(with: pinchChanged)
+        view.magnify(with: pinchEnded)
+        XCTAssertEqual(canvas.annotations[0].fontSize, 45.0, accuracy: 0.25)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforePinch + 1)
+
+        let singlePinch = SyntheticTrackpadEvent()
+        singlePinch.stubPhase = []
+        singlePinch.stubMagnification = 0.10
+        view.magnify(with: singlePinch)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforePinch + 2)
+    }
+
+    func testBracketShortcutsAndToolbarButtonsAdjustTextSizeAndShowToast() {
+        let harness = makeCanvasHarness()
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+
+        var reportedTextSizes: [Double] = []
+        view.onTextSizeChanged = { reportedTextSizes.append($0) }
+
+        settings.currentDrawMode = .text
+        settings.annotateFontSize = 24.0
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(settings.annotateFontSize, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(reportedTextSizes.last ?? 0, 26.0, accuracy: 1e-6)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(settings.annotateFontSize, 24.0, accuracy: 1e-6)
+        XCTAssertEqual(reportedTextSizes.last ?? 0, 24.0, accuracy: 1e-6)
+
+        let textItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 100, y: 100),
+            endPoint: CGPoint(x: 100, y: 100),
+            strokeColor: .white,
+            text: "Shortcut Target",
+            fontSize: 20.0
+        )
+        canvas.annotations = [textItem]
+        canvas.selectedIDs = [textItem.id]
+        settings.currentDrawMode = .rectangle
+
+        let undoBeforeBracket = canvas.undoStack.count
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].fontSize, 22.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.annotateFontSize, 22.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeBracket + 1)
+
+        var toolbarReportedSizes: [Double] = []
+        let controls = AnnotateControlsView(
+            settings: settings,
+            canvasState: canvas,
+            onTextSizeChanged: { toolbarReportedSizes.append($0) }
+        )
+        XCTAssertTrue(controls.isAdjustingTextSize)
+        XCTAssertEqual(controls.displayedTextFontSize, 22.0, accuracy: 1e-6)
+
+        controls.increaseTextSize()
+        XCTAssertEqual(canvas.annotations[0].fontSize, 24.0, accuracy: 1e-6)
+        XCTAssertEqual(toolbarReportedSizes.last ?? 0, 24.0, accuracy: 1e-6)
+
+        controls.decreaseTextSize()
+        XCTAssertEqual(canvas.annotations[0].fontSize, 22.0, accuracy: 1e-6)
+        XCTAssertEqual(toolbarReportedSizes.last ?? 0, 22.0, accuracy: 1e-6)
+
+        canvas.scaleTextAnnotation(textItem.id, toFontSize: 8.0)
+        controls.decreaseTextSize()
+        XCTAssertEqual(canvas.annotations[0].fontSize, 8.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.annotateFontSize, 10.0, accuracy: 1e-6)
+
+        canvas.scaleTextAnnotation(textItem.id, toFontSize: 200.0)
+        controls.increaseTextSize()
+        XCTAssertEqual(canvas.annotations[0].fontSize, 200.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.annotateFontSize, 96.0, accuracy: 1e-6)
+
+        let rectItem = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 10, y: 10),
+            endPoint: CGPoint(x: 50, y: 50),
+            strokeColor: .red
+        )
+        canvas.annotations.append(rectItem)
+        canvas.selectedIDs = [rectItem.id]
+        XCTAssertFalse(controls.isAdjustingTextSize)
+
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let overlay = AnnotateOverlayController(settings: settings, shortcutManager: shortcuts, canvasState: canvas)
+        overlay.showAnnotation()
+        canvas.selectedIDs = [textItem.id]
+        canvas.scaleTextAnnotation(textItem.id, toFontSize: 30.0)
+        XCTAssertEqual(overlay.canvasView?.handleKeyCommand(keyCode: 0x1E, modifiers: 0), true)
+        XCTAssertEqual(overlay.toastController.currentMessage, "Text Size: 32 pt")
+        overlay.hideAnnotation()
+    }
+
+    func testTextRotationHandleDragShiftSnapTrackpadRotateAndRotatedHitTesting() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+
+        let banner = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 110, y: 160),
+            endPoint: CGPoint(x: 110, y: 160),
+            strokeColor: .white,
+            text: "Wide Rotatable Text Banner",
+            fontSize: 28.0
+        )
+        canvas.annotations = [banner]
+        canvas.selectedIDs = [banner.id]
+
+        let selectionBox = banner.textSelectionBox
+        XCTAssertEqual(banner.localTextRotationHandleCenter.x, selectionBox.midX, accuracy: 1e-6)
+        XCTAssertEqual(banner.localTextRotationHandleCenter.y, selectionBox.maxY + 22.0, accuracy: 1e-6)
+
+        let center = banner.textCenter
+        let startHandle = banner.worldTextRotationHandleCenter
+        let radius = hypot(startHandle.x - center.x, startHandle.y - center.y)
+        let startAngle = atan2(Double(startHandle.y - center.y), Double(startHandle.x - center.x))
+        let undoBeforeRotate = canvas.undoStack.count
+
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: startHandle), in: window))
+        let midAngle = startAngle + Double.pi / 8.0
+        let endAngle = startAngle + Double.pi / 4.0
+        let midPoint = CGPoint(
+            x: center.x + CGFloat(cos(midAngle)) * radius,
+            y: center.y + CGFloat(sin(midAngle)) * radius
+        )
+        let endPoint = CGPoint(
+            x: center.x + CGFloat(cos(endAngle)) * radius,
+            y: center.y + CGFloat(sin(endAngle)) * radius
+        )
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: midPoint), in: window))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: endPoint), in: window))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: endPoint), in: window))
+
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, Double.pi / 4.0, accuracy: 1e-3)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeRotate + 1)
+
+        canvas.setTextRotation(0.0, for: banner.id)
+        let resetHandle = canvas.annotations[0].worldTextRotationHandleCenter
+        let rawSnapAngle = startAngle + (22.0 * Double.pi / 180.0)
+        let snapDragPoint = CGPoint(
+            x: center.x + CGFloat(cos(rawSnapAngle)) * radius,
+            y: center.y + CGFloat(sin(rawSnapAngle)) * radius
+        )
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: resetHandle), in: window))
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: snapDragPoint, modifiers: [.shift]),
+                in: window
+            )
+        )
+        view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: snapDragPoint, modifiers: [.shift]),
+                in: window
+            )
+        )
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, Double.pi / 12.0, accuracy: 1e-6)
+
+        let unrotatedRect = banner.textLayoutRect
+        XCTAssertGreaterThan(unrotatedRect.width, unrotatedRect.height * 3.0)
+        canvas.setTextRotation(Double.pi / 2.0, for: banner.id)
+        let rotatedItem = canvas.annotations[0]
+        let rotatedBounds = rotatedItem.boundingRect
+        XCTAssertEqual(rotatedBounds.width, unrotatedRect.height, accuracy: 1e-3)
+        XCTAssertEqual(rotatedBounds.height, unrotatedRect.width, accuracy: 1e-3)
+
+        let verticalArmPoint = CGPoint(
+            x: center.x,
+            y: center.y + unrotatedRect.width * 0.40
+        )
+        let vacatedHorizontalPoint = CGPoint(
+            x: center.x + unrotatedRect.width * 0.45,
+            y: center.y
+        )
+        XCTAssertEqual(canvas.hitTestAnnotation(at: verticalArmPoint), banner.id)
+        XCTAssertNil(canvas.hitTestAnnotation(at: vacatedHorizontalPoint))
+
+        let rotatedHandle = rotatedItem.worldTextRotationHandleCenter
+        XCTAssertEqual(rotatedHandle.x, center.x - (unrotatedRect.height * 0.5 + 26.0), accuracy: 1.0)
+        XCTAssertEqual(rotatedHandle.y, center.y, accuracy: 1.0)
+
+        let undoBeforeTrackpadRotate = canvas.undoStack.count
+        let rotBegan = SyntheticTrackpadEvent()
+        rotBegan.stubPhase = .began
+        rotBegan.stubRotation = 15.0
+        let rotChanged = SyntheticTrackpadEvent()
+        rotChanged.stubPhase = .changed
+        rotChanged.stubRotation = 15.0
+        let rotEnded = SyntheticTrackpadEvent()
+        rotEnded.stubPhase = .ended
+        rotEnded.stubRotation = 0.0
+
+        view.rotate(with: rotBegan)
+        view.rotate(with: rotChanged)
+        view.rotate(with: rotEnded)
+        XCTAssertEqual(
+            canvas.annotations[0].rotationRadians,
+            Double.pi / 2.0 + (30.0 * Double.pi / 180.0),
+            accuracy: 1e-4
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeTrackpadRotate + 1)
+    }
+
+    func testTextRotationSessionRoundTripLegacyJSONDecodeAndNonFiniteSanitization() throws {
+        let legacyJSON = """
+        [
+          {
+            "id": "5621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "text",
+            "points": [[60, 80]],
+            "startPoint": [60, 80],
+            "endPoint": [60, 80],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 1, "green": 1, "blue": 1, "alpha": 1},
+            "lineWeight": 2,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 100,
+            "text": "Legacy Note",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 28
+          }
+        ]
+        """.data(using: .utf8)!
+
+        let decodedLegacy = try JSONDecoder().decode([AnnotationItem].self, from: legacyJSON)
+        XCTAssertEqual(decodedLegacy.count, 1)
+        XCTAssertEqual(decodedLegacy[0].rotationRadians, 0.0, accuracy: 1e-9)
+
+        let canvas = AnnotationCanvasState()
+        XCTAssertTrue(canvas.importSessionData(legacyJSON))
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, 0.0, accuracy: 1e-9)
+
+        canvas.setTextRotation(Double.pi / 3.0, for: canvas.annotations[0].id)
+        guard let exported = canvas.exportSessionData() else {
+            XCTFail("Expected exported session JSON data")
+            return
+        }
+
+        let restoredCanvas = AnnotationCanvasState()
+        XCTAssertTrue(restoredCanvas.importSessionData(exported))
+        XCTAssertEqual(restoredCanvas.annotations.count, 1)
+        XCTAssertEqual(restoredCanvas.annotations[0].rotationRadians, Double.pi / 3.0, accuracy: 1e-9)
+
+        XCTAssertEqual(AnnotationCanvasState.sanitizeRotationRadians(.nan), 0.0, accuracy: 1e-9)
+        XCTAssertEqual(AnnotationCanvasState.sanitizeRotationRadians(.infinity), 0.0, accuracy: 1e-9)
+        XCTAssertEqual(AnnotationCanvasState.sanitizeRotationRadians(-.infinity), 0.0, accuracy: 1e-9)
+
+        let largeRotationJSON = """
+        [
+          {
+            "id": "6621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "text",
+            "points": [[50, 70]],
+            "startPoint": [50, 70],
+            "endPoint": [50, 70],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 1, "green": 1, "blue": 1, "alpha": 1},
+            "lineWeight": 2,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 100,
+            "text": "Wrapped Angle",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 24,
+            "rotationRadians": 100.0
+          }
+        ]
+        """.data(using: .utf8)!
+        XCTAssertTrue(restoredCanvas.importSessionData(largeRotationJSON))
+        let expectedWrapped = (100.0).remainder(dividingBy: 2.0 * Double.pi)
+        XCTAssertEqual(restoredCanvas.annotations[0].rotationRadians, expectedWrapped, accuracy: 1e-9)
+        XCTAssertLessThanOrEqual(abs(restoredCanvas.annotations[0].rotationRadians), Double.pi)
+
+        var nonFiniteItem = restoredCanvas.annotations[0]
+        nonFiniteItem.rotationRadians = .nan
+        XCTAssertEqual(nonFiniteItem.effectiveRotationRadians, 0.0, accuracy: 1e-9)
+        XCTAssertTrue(nonFiniteItem.boundingRect.width.isFinite)
+        XCTAssertTrue(nonFiniteItem.boundingRect.height.isFinite)
+    }
+
+    func testSelectedRotatedTextRendersBlueLightBlueAndWhiteHandlesWithoutPurple() {
+        let harness = makeCanvasHarness()
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        settings.isWhiteboardActive = false
+        settings.dimScreenOnAnnotate = false
+
+        let rotatedText = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 150, y: 150),
+            endPoint: CGPoint(x: 150, y: 150),
+            strokeColor: .white,
+            text: "Theme Check",
+            fontSize: 32.0,
+            rotationRadians: Double.pi / 6.0
+        )
+        canvas.annotations = [rotatedText]
+        canvas.selectedIDs = [rotatedText.id]
+
+        guard let pngData = Screenshotter.renderViewToPNGData(view),
+              let cgImage = NSBitmapImageRep(data: pngData)?.cgImage else {
+            XCTFail("Expected rendered PNG for selected rotated text")
+            return
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            XCTFail("Expected sRGB color space")
+            return
+        }
+
+        let imgWidth = cgImage.width
+        let imgHeight = cgImage.height
+        var bytes = [UInt8](repeating: 0, count: imgWidth * imgHeight * 4)
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        let didRasterize = bytes.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let context = CGContext(
+                data: rawBuffer.baseAddress,
+                width: imgWidth,
+                height: imgHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: imgWidth * 4,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return false
+            }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: imgWidth, height: imgHeight))
+            return true
+        }
+        XCTAssertTrue(didRasterize)
+
+        let scaleX = Double(imgWidth) / Double(max(1.0, view.bounds.width))
+        let scaleY = Double(imgHeight) / Double(max(1.0, view.bounds.height))
+        let rotHandle = rotatedText.worldTextRotationHandleCenter
+        let centerPxX = Int((Double(rotHandle.x) * scaleX).rounded())
+        let centerPxY = Int((Double(view.bounds.height - rotHandle.y) * scaleY).rounded())
+
+        var foundWhiteHandleInterior = false
+        var foundBlueHandleStroke = false
+        let searchRadius = max(6, Int((7.0 * scaleX).rounded()))
+        for dy in -searchRadius...searchRadius {
+            for dx in -searchRadius...searchRadius {
+                let pxX = centerPxX + dx
+                let pxY = centerPxY + dy
+                let inXBounds = pxX >= 0 && pxX < imgWidth
+                let inYBounds = pxY >= 0 && pxY < imgHeight
+                guard inXBounds && inYBounds else { continue }
+                let offset = (pxY * imgWidth + pxX) * 4
+                let r = bytes[offset]
+                let g = bytes[offset + 1]
+                let b = bytes[offset + 2]
+                let a = bytes[offset + 3]
+                let isBrightRG = r >= 235 && g >= 235
+                let isOpaqueWhite = b >= 235 && a >= 245
+                if isBrightRG && isOpaqueWhite {
+                    foundWhiteHandleInterior = true
+                }
+                let isBlueDominantOverRed = Int(b) > Int(r) + 60
+                let isVisibleBlue = a >= 120 && b >= 150
+                if isBlueDominantOverRed && isVisibleBlue {
+                    foundBlueHandleStroke = true
+                }
+            }
+        }
+        XCTAssertTrue(foundWhiteHandleInterior)
+        XCTAssertTrue(foundBlueHandleStroke)
+
+        var foundPurplePixel = false
+        for idx in stride(from: 0, to: bytes.count, by: 4) {
+            let r = bytes[idx]
+            let g = bytes[idx + 1]
+            let b = bytes[idx + 2]
+            let a = bytes[idx + 3]
+            let hasRedExcessOverGreen = Int(r) > Int(g) + 30
+            let hasPurpleBlueChannel = b > 100 && a > 40
+            if hasRedExcessOverGreen && hasPurpleBlueChannel {
+                foundPurplePixel = true
+            }
+        }
+        XCTAssertFalse(foundPurplePixel)
+    }
+
+    func testRemainingCornerScaleHandlesAndRotatedTextCornerScaling() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+
+        for cornerIndex in [0, 1, 3] {
+            let item = AnnotationItem(
+                mode: .text,
+                startPoint: CGPoint(x: 160, y: 150),
+                endPoint: CGPoint(x: 160, y: 150),
+                strokeColor: .white,
+                text: "Corner \(cornerIndex)",
+                fontSize: 20.0
+            )
+            canvas.annotations = [item]
+            canvas.selectedIDs = [item.id]
+
+            let initialCenter = item.textCenter
+            let handle = item.worldTextScaleHandleCenters[cornerIndex]
+            let dx = handle.x - initialCenter.x
+            let dy = handle.y - initialCenter.y
+            let scaledTarget = CGPoint(x: initialCenter.x + dx * 1.5, y: initialCenter.y + dy * 1.5)
+
+            view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: handle), in: window))
+            view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: scaledTarget), in: window))
+            view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: scaledTarget), in: window))
+
+            XCTAssertEqual(canvas.annotations[0].fontSize, 30.0, accuracy: 0.25)
+            XCTAssertEqual(canvas.annotations[0].textCenter.x, initialCenter.x, accuracy: 1.0)
+            XCTAssertEqual(canvas.annotations[0].textCenter.y, initialCenter.y, accuracy: 1.0)
+        }
+
+        let initialRotation = Double.pi / 3.0
+        let rotatedItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 150, y: 150),
+            endPoint: CGPoint(x: 150, y: 150),
+            strokeColor: .white,
+            text: "Rotated Scale",
+            fontSize: 24.0,
+            rotationRadians: initialRotation
+        )
+        canvas.annotations = [rotatedItem]
+        canvas.selectedIDs = [rotatedItem.id]
+
+        let rotatedCenter = rotatedItem.textCenter
+        let rotatedCorner = rotatedItem.worldTextScaleHandleCenters[1]
+        let rDx = rotatedCorner.x - rotatedCenter.x
+        let rDy = rotatedCorner.y - rotatedCenter.y
+        let doubledCorner = CGPoint(x: rotatedCenter.x + rDx * 2.0, y: rotatedCenter.y + rDy * 2.0)
+
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: rotatedCorner), in: window))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: doubledCorner), in: window))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: doubledCorner), in: window))
+
+        XCTAssertEqual(canvas.annotations[0].fontSize, 48.0, accuracy: 0.25)
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, initialRotation, accuracy: 1e-9)
+        XCTAssertEqual(canvas.annotations[0].textCenter.x, rotatedCenter.x, accuracy: 1.0)
+        XCTAssertEqual(canvas.annotations[0].textCenter.y, rotatedCenter.y, accuracy: 1.0)
+    }
+
+    func testRotatedTextMarqueeSelectionHitsRotatedBodyAndMissesVacatedCorners() {
+        let canvas = AnnotationCanvasState()
+        let banner90 = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 100, y: 160),
+            endPoint: CGPoint(x: 100, y: 160),
+            strokeColor: .white,
+            text: "Wide Rotated Marquee Target Banner",
+            fontSize: 28.0,
+            rotationRadians: Double.pi / 2.0
+        )
+        canvas.annotations = [banner90]
+
+        let unrotated90 = banner90.textLayoutRect
+        let center90 = banner90.textCenter
+        let vacatedWingMarquee = CGRect(
+            x: center90.x + unrotated90.width * 0.35,
+            y: center90.y - 6.0,
+            width: 12.0,
+            height: 12.0
+        )
+        XCTAssertTrue(vacatedWingMarquee.intersects(unrotated90))
+        canvas.selectAnnotations(in: vacatedWingMarquee)
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
+
+        let rotatedArmMarquee = CGRect(
+            x: center90.x - 6.0,
+            y: center90.y + unrotated90.width * 0.35,
+            width: 12.0,
+            height: 12.0
+        )
+        canvas.selectAnnotations(in: rotatedArmMarquee)
+        XCTAssertEqual(canvas.selectedIDs, [banner90.id])
+
+        let banner45 = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 100, y: 160),
+            endPoint: CGPoint(x: 100, y: 160),
+            strokeColor: .white,
+            text: "Wide Rotated Marquee Target Banner",
+            fontSize: 28.0,
+            rotationRadians: Double.pi / 4.0
+        )
+        canvas.annotations = [banner45]
+        let aabb45 = banner45.boundingRect
+        let vacatedTopLeftAABBCorner = CGRect(
+            x: aabb45.minX + 2.0,
+            y: aabb45.maxY - 12.0,
+            width: 10.0,
+            height: 10.0
+        )
+        XCTAssertTrue(vacatedTopLeftAABBCorner.intersects(aabb45))
+        canvas.selectAnnotations(in: vacatedTopLeftAABBCorner)
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
+
+        let centerBodyMarquee = CGRect(
+            x: banner45.textCenter.x - 5.0,
+            y: banner45.textCenter.y - 5.0,
+            width: 10.0,
+            height: 10.0
+        )
+        canvas.selectAnnotations(in: centerBodyMarquee)
+        XCTAssertEqual(canvas.selectedIDs, [banner45.id])
+    }
+
+    func testInlineEditEscapeCancelFreeHandDoubleClickJitterLiveSizeSyncMultiSelectHandlesAndWidthClamp() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+
+        let item = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 90, y: 120),
+            endPoint: CGPoint(x: 90, y: 120),
+            strokeColor: .yellow,
+            text: "Keep Original",
+            fontSize: 30.0,
+            rotationRadians: Double.pi / 8.0
+        )
+        canvas.annotations = [item]
+        canvas.selectedIDs = [item.id]
+        let undoCountInitial = canvas.undoStack.count
+
+        settings.currentDrawMode = .freeHand
+        let hitCenter = item.textCenter
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: hitCenter, clickCount: 2),
+                in: window
+            )
+        )
+        XCTAssertNotNil(view.activeTextField)
+
+        let jitterA = CGPoint(x: hitCenter.x + 8.0, y: hitCenter.y + 5.0)
+        let jitterB = CGPoint(x: hitCenter.x + 16.0, y: hitCenter.y + 10.0)
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: jitterA), in: window))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: jitterB), in: window))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: jitterB), in: window))
+
+        XCTAssertNil(canvas.activeDraft)
+        XCTAssertEqual(canvas.annotations.count, 1)
+        XCTAssertNotNil(view.activeTextField)
+
+        view.activeTextField?.stringValue = "Discarded Draft"
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x35, modifiers: 0))
+        XCTAssertNil(view.activeTextField)
+        XCTAssertEqual(canvas.annotations.count, 1)
+        XCTAssertEqual(canvas.annotations[0].text, "Keep Original")
+        XCTAssertEqual(canvas.annotations[0].fontSize, 30.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoCountInitial)
+
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: canvas.annotations[0].textCenter, clickCount: 2),
+                in: window
+            )
+        )
+        XCTAssertNotNil(view.activeTextField)
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+        controls.increaseTextSize()
+        controls.increaseTextSize()
+        XCTAssertEqual(Double(view.activeTextField?.font?.pointSize ?? 0), 34.0, accuracy: 1e-6)
+        view.activeTextField?.stringValue = "Resized While Editing"
+        view.commitActiveTextEditing()
+        XCTAssertEqual(canvas.annotations[0].text, "Resized While Editing")
+        XCTAssertEqual(canvas.annotations[0].fontSize, 34.0, accuracy: 1e-6)
+
+        canvas.selectedIDs.removeAll()
+        settings.currentDrawMode = .text
+        settings.annotateFontSize = 22.0
+        view.beginInlineTextEditing(at: CGPoint(x: 40, y: 40))
+        controls.increaseTextSize()
+        XCTAssertEqual(Double(view.activeTextField?.font?.pointSize ?? 0), 24.0, accuracy: 1e-6)
+        view.activeTextField?.stringValue = "New Sized Text"
+        view.commitActiveTextEditing()
+        XCTAssertEqual(canvas.annotations.last?.fontSize ?? 0, 24.0, accuracy: 1e-6)
+
+        let secondShape = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 20, y: 20),
+            endPoint: CGPoint(x: 60, y: 60),
+            strokeColor: .blue
+        )
+        canvas.annotations = [item, secondShape]
+        canvas.selectedIDs = [item.id, secondShape.id]
+        settings.isWhiteboardActive = false
+        settings.dimScreenOnAnnotate = false
+
+        guard let multiPNG = Screenshotter.renderViewToPNGData(view),
+              let multiCG = NSBitmapImageRep(data: multiPNG)?.cgImage else {
+            XCTFail("Expected rendered PNG for multi-selection")
+            return
+        }
+        let scaleX = Double(multiCG.width) / Double(max(1.0, view.bounds.width))
+        let scaleY = Double(multiCG.height) / Double(max(1.0, view.bounds.height))
+        let suppressedRotHandle = item.worldTextRotationHandleCenter
+        let rotPxX = Int((Double(suppressedRotHandle.x) * scaleX).rounded())
+        let rotPxY = Int((Double(view.bounds.height - suppressedRotHandle.y) * scaleY).rounded())
+        if let handlePx = rgbaPixel(in: multiCG, at: (x: rotPxX, y: rotPxY)) {
+            XCTAssertEqual(handlePx.a, 0)
+        } else {
+            XCTFail("Expected readable pixel at rotation handle coordinate")
+        }
+
+        let wideFrame = NSRect(x: 0, y: 0, width: 2000, height: 900)
+        let wideShortcuts = ShortcutManager(defaults: testDefaults)
+        let wideView = AnnotateCanvasView(
+            frame: wideFrame,
+            canvasState: canvas,
+            settings: settings,
+            shortcutManager: wideShortcuts
+        )
+        let hugeText = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 20, y: 100),
+            endPoint: CGPoint(x: 20, y: 100),
+            strokeColor: .white,
+            text: String(repeating: "W", count: 5000),
+            fontSize: 200.0
+        )
+        canvas.annotations = [hugeText]
+        wideView.beginInlineTextEditing(at: hugeText.startPoint, existingID: hugeText.id)
+        guard let clampedField = wideView.activeTextField else {
+            XCTFail("Expected activeTextField for long single-line text")
+            return
+        }
+        XCTAssertLessThanOrEqual(clampedField.frame.width, 1200.0)
+        XCTAssertLessThanOrEqual(clampedField.frame.height, 400.0)
+        wideView.cancelActiveTextEditing()
+    }
+
+    func testTextHardeningNaNFontSizeNonFiniteDeltaAndPointsRotationNormalizationTextCapAndImportBounds() throws {
+        let harness = makeCanvasHarness()
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+
+        let nanInitItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 80, y: 90),
+            endPoint: CGPoint(x: 80, y: 90),
+            strokeColor: .white,
+            text: "Safe Init",
+            fontSize: .nan,
+            rotationRadians: .infinity
+        )
+        XCTAssertEqual(nanInitItem.fontSize, 24.0, accuracy: 1e-6)
+        XCTAssertEqual(nanInitItem.rotationRadians, 0.0, accuracy: 1e-9)
+
+        let infInitItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 80, y: 90),
+            endPoint: CGPoint(x: 80, y: 90),
+            strokeColor: .white,
+            text: "Safe Inf",
+            fontSize: .infinity
+        )
+        XCTAssertEqual(infInitItem.fontSize, 24.0, accuracy: 1e-6)
+
+        var corruptedItem = nanInitItem
+        corruptedItem.fontSize = .nan
+        canvas.annotations = [corruptedItem]
+        canvas.selectedIDs = [corruptedItem.id]
+        settings.currentDrawMode = .text
+
+        var reportedSizes: [Double] = []
+        let controls = AnnotateControlsView(
+            settings: settings,
+            canvasState: canvas,
+            onTextSizeChanged: { reportedSizes.append($0) }
+        )
+        XCTAssertEqual(controls.displayedTextFontSize, 24.0, accuracy: 1e-6)
+        let hostingCorruptedItem = FirstMouseHostingView(rootView: controls)
+        hostingCorruptedItem.frame = NSRect(x: 0, y: 0, width: 720, height: 52)
+        hostingCorruptedItem.layoutSubtreeIfNeeded()
+
+        controls.increaseTextSize()
+        XCTAssertEqual(canvas.annotations[0].fontSize, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(settings.annotateFontSize, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(reportedSizes.last ?? 0, 26.0, accuracy: 1e-6)
+
+        canvas.selectedIDs.removeAll()
+        settings.annotateFontSize = .nan
+        XCTAssertEqual(controls.displayedTextFontSize, 24.0, accuracy: 1e-6)
+        let hostingCorruptedSetting = FirstMouseHostingView(rootView: controls)
+        hostingCorruptedSetting.frame = NSRect(x: 0, y: 0, width: 720, height: 52)
+        hostingCorruptedSetting.layoutSubtreeIfNeeded()
+
+        controls.decreaseTextSize()
+        XCTAssertEqual(settings.annotateFontSize, 22.0, accuracy: 1e-6)
+        XCTAssertEqual(reportedSizes.last ?? 0, 22.0, accuracy: 1e-6)
+
+        settings.annotateFontSize = .infinity
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(settings.annotateFontSize, 26.0, accuracy: 1e-6)
+
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let overlay = AnnotateOverlayController(settings: settings, shortcutManager: shortcuts, canvasState: canvas)
+        overlay.showAnnotation()
+        overlay.canvasView?.onTextSizeChanged?(.nan)
+        XCTAssertEqual(overlay.toastController.currentMessage, "Text Size: 24 pt")
+        overlay.canvasView?.onTextSizeChanged?(.infinity)
+        XCTAssertEqual(overlay.toastController.currentMessage, "Text Size: 24 pt")
+        overlay.hideAnnotation()
+
+        let moveTarget = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 100, y: 120),
+            endPoint: CGPoint(x: 100, y: 120),
+            strokeColor: .white,
+            text: "Move Guard",
+            fontSize: 24.0
+        )
+        canvas.annotations = [moveTarget]
+        canvas.selectedIDs = [moveTarget.id]
+        let undoBeforeInvalidMove = canvas.undoStack.count
+        canvas.moveSelectedAnnotations(by: CGSize(width: CGFloat.nan, height: 0))
+        canvas.moveSelectedAnnotations(by: CGSize(width: 12, height: CGFloat.infinity))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeInvalidMove)
+        XCTAssertEqual(canvas.annotations[0].startPoint, CGPoint(x: 100, y: 120))
+        XCTAssertEqual(canvas.annotations[0].points, [CGPoint(x: 100, y: 120)])
+
+        view.beginInlineTextEditing(at: CGPoint(x: CGFloat.nan, y: 80))
+        XCTAssertNil(view.activeTextField)
+        view.beginInlineTextEditing(at: CGPoint(x: 80, y: CGFloat.infinity))
+        XCTAssertNil(view.activeTextField)
+
+        let undoBeforeInvalidAdd = canvas.undoStack.count
+        canvas.addOrUpdateTextAnnotation(at: CGPoint(x: CGFloat.nan, y: 40), text: "Rejected", color: .white)
+        canvas.addOrUpdateTextAnnotation(
+            id: moveTarget.id,
+            at: CGPoint(x: 40, y: CGFloat.infinity),
+            text: "Rejected Update",
+            color: .white
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeInvalidAdd)
+        XCTAssertEqual(canvas.annotations.count, 1)
+        XCTAssertEqual(canvas.annotations[0].text, "Move Guard")
+
+        canvas.setTextRotation(1_000.0 * Double.pi + (Double.pi / 3.0), for: moveTarget.id)
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, Double.pi / 3.0, accuracy: 1e-9)
+        XCTAssertLessThanOrEqual(abs(canvas.annotations[0].rotationRadians), Double.pi)
+
+        for _ in 0..<60 {
+            canvas.rotateSelectedTextAnnotations(by: 1.9)
+        }
+        canvas.rotateSelectedTextAnnotations(by: 1e100)
+        XCTAssertTrue(canvas.annotations[0].rotationRadians.isFinite)
+        XCTAssertLessThanOrEqual(abs(canvas.annotations[0].rotationRadians), Double.pi)
+        guard let exportedAfterRotations = canvas.exportSessionData() else {
+            XCTFail("Expected non-nil session export after repeated rotations")
+            return
+        }
+        let roundTripCanvas = AnnotationCanvasState()
+        XCTAssertTrue(roundTripCanvas.importSessionData(exportedAfterRotations))
+        XCTAssertEqual(
+            roundTripCanvas.annotations[0].rotationRadians,
+            canvas.annotations[0].rotationRadians,
+            accuracy: 1e-9
+        )
+
+        let oversizedString = String(repeating: "M", count: 5_000)
+        let cappedItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 20, y: 30),
+            endPoint: CGPoint(x: 20, y: 30),
+            strokeColor: .white,
+            text: oversizedString
+        )
+        XCTAssertEqual(cappedItem.text.count, 2_048)
+
+        canvas.addOrUpdateTextAnnotation(at: CGPoint(x: 30, y: 40), text: oversizedString, color: .white)
+        XCTAssertEqual(canvas.annotations.last?.text.count, 2_048)
+
+        view.beginInlineTextEditing(at: CGPoint(x: 50, y: 60))
+        guard let liveField = view.activeTextField else {
+            XCTFail("Expected activeTextField for finite origin")
+            return
+        }
+        liveField.stringValue = oversizedString
+        view.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: liveField))
+        XCTAssertEqual(liveField.stringValue.count, 2_048)
+        liveField.stringValue = oversizedString
+        view.commitActiveTextEditing()
+        XCTAssertEqual(canvas.annotations.last?.text.count, 2_048)
+
+        let baselineCachedRect = cappedItem.textLayoutRect
+        for idx in 0..<280 {
+            let transient = AnnotationItem(
+                mode: .text,
+                startPoint: CGPoint(x: 10, y: 10),
+                endPoint: CGPoint(x: 10, y: 10),
+                strokeColor: .white,
+                text: "Cache Entry \(idx)",
+                fontSize: 20.0
+            )
+            XCTAssertGreaterThanOrEqual(transient.textLayoutRect.width, 24.0)
+        }
+        XCTAssertEqual(cappedItem.textLayoutRect, baselineCachedRect)
+
+        let seed = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 25, y: 35),
+            endPoint: CGPoint(x: 25, y: 35),
+            strokeColor: .white,
+            text: "Preserved Seed",
+            fontSize: 24.0
+        )
+        canvas.annotations = [seed]
+
+        let over4MBData = Data(repeating: 0x20, count: 4_194_305)
+        XCTAssertFalse(canvas.importSessionData(over4MBData))
+        XCTAssertEqual(canvas.annotations, [seed])
+
+        let over2000Items = Array(repeating: seed, count: 2_001)
+        let over2000Data = try JSONEncoder().encode(over2000Items)
+        XCTAssertLessThanOrEqual(over2000Data.count, 4_194_304)
+        XCTAssertFalse(canvas.importSessionData(over2000Data))
+        XCTAssertEqual(canvas.annotations, [seed])
+
+        let over10kPointsItem = AnnotationItem(
+            mode: .freeHand,
+            points: Array(repeating: CGPoint(x: 15, y: 15), count: 10_001),
+            startPoint: CGPoint(x: 15, y: 15),
+            endPoint: CGPoint(x: 15, y: 15),
+            strokeColor: .red
+        )
+        let over10kPointsData = try JSONEncoder().encode([over10kPointsItem])
+        XCTAssertLessThanOrEqual(over10kPointsData.count, 4_194_304)
+        XCTAssertFalse(canvas.importSessionData(over10kPointsData))
+        XCTAssertEqual(canvas.annotations, [seed])
+
+        let over2048TextString = String(repeating: "Z", count: 2_049)
+        let over2048TextJSON = """
+        [
+          {
+            "id": "7621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+            "mode": "text",
+            "points": [[20, 20]],
+            "startPoint": [20, 20],
+            "endPoint": [20, 20],
+            "isConstrained": false,
+            "isFilled": false,
+            "strokeColor": {"red": 1, "green": 1, "blue": 1, "alpha": 1},
+            "lineWeight": 2,
+            "isHighlighter": false,
+            "isAutoErase": false,
+            "createdAt": 100,
+            "text": "\(over2048TextString)",
+            "fontName": ".AppleSystemUIFont",
+            "fontSize": 24
+          }
+        ]
+        """.data(using: .utf8)!
+        XCTAssertFalse(canvas.importSessionData(over2048TextJSON))
+        XCTAssertEqual(canvas.annotations, [seed])
+    }
+
+    func testInterruptedTransformResetsOnHideAnnotationAndInteractivePassThroughRelease() {
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateSaveSession = true
+        settings.currentDrawMode = .text
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let overlay = AnnotateOverlayController(settings: settings, shortcutManager: shortcuts, canvasState: canvas)
+
+        let textItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 120, y: 140),
+            endPoint: CGPoint(x: 120, y: 140),
+            strokeColor: .white,
+            text: "Interrupt Target",
+            fontSize: 24.0
+        )
+        canvas.annotations = [textItem]
+        canvas.selectedIDs = [textItem.id]
+
+        overlay.showAnnotation()
+        guard let panel = overlay.panel, let view = overlay.canvasView else {
+            XCTFail("Expected overlay panel and canvasView")
+            return
+        }
+
+        let startPt = canvas.annotations[0].textCenter
+        let dragMidPt = CGPoint(x: startPt.x + 25, y: startPt.y + 15)
+        let undoBeforeHideInterrupt = canvas.undoStack.count
+
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: startPt), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: dragMidPt), in: panel))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeHideInterrupt + 1)
+
+        overlay.hideAnnotation()
+        overlay.showAnnotation()
+        canvas.selectedIDs = [textItem.id]
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].fontSize, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeHideInterrupt + 2)
+
+        settings.annotateInteractiveMode = true
+        settings.interactiveModeKey = .fn
+        overlay.updateInteractivePassThrough(modifierFlags: [.function])
+        XCTAssertFalse(panel.ignoresMouseEvents)
+
+        let scaleHandle = canvas.annotations[0].worldTextScaleHandleCenters[2]
+        let scaleCenter = canvas.annotations[0].textCenter
+        let scaleDragPt = CGPoint(
+            x: scaleCenter.x + (scaleHandle.x - scaleCenter.x) * 1.4,
+            y: scaleCenter.y + (scaleHandle.y - scaleCenter.y) * 1.4
+        )
+        let undoBeforeFnRelease = canvas.undoStack.count
+
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: scaleHandle), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: scaleDragPt), in: panel))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeFnRelease + 1)
+
+        overlay.updateInteractivePassThrough(modifierFlags: [])
+        XCTAssertTrue(panel.ignoresMouseEvents)
+
+        overlay.updateInteractivePassThrough(modifierFlags: [.function])
+        XCTAssertFalse(panel.ignoresMouseEvents)
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeFnRelease + 2)
+
+        let nextDragStart = canvas.annotations[0].textCenter
+        let nextDragEnd = CGPoint(x: nextDragStart.x + 18, y: nextDragStart.y - 12)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: nextDragStart), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: nextDragEnd), in: panel))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: nextDragEnd), in: panel))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeFnRelease + 3)
+
+        settings.annotateSaveSession = false
+        overlay.hideAnnotation()
+    }
+
+    func testMultiSelectedRotatedTextRendersDashedSelectionFrameWhileSuppressingSingleItemHandles() {
+        let harness = makeCanvasHarness()
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        settings.isWhiteboardActive = false
+        settings.dimScreenOnAnnotate = false
+        settings.annotateToolIndicator = false
+
+        let rotatedText = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 150, y: 150),
+            endPoint: CGPoint(x: 150, y: 150),
+            strokeColor: .yellow,
+            text: "Multi Select Frame",
+            fontSize: 32.0,
+            rotationRadians: Double.pi / 6.0
+        )
+        let otherRect = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 20, y: 20),
+            endPoint: CGPoint(x: 60, y: 60),
+            strokeColor: .green
+        )
+        canvas.annotations = [rotatedText, otherRect]
+        canvas.selectedIDs = [rotatedText.id, otherRect.id]
+
+        guard let pngData = Screenshotter.renderViewToPNGData(view),
+              let cgImage = NSBitmapImageRep(data: pngData)?.cgImage,
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            XCTFail("Expected rendered PNG for multi-selected rotated text")
+            return
+        }
+
+        let imgWidth = cgImage.width
+        let imgHeight = cgImage.height
+        var bytes = [UInt8](repeating: 0, count: imgWidth * imgHeight * 4)
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        let didRasterize = bytes.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let context = CGContext(
+                data: rawBuffer.baseAddress,
+                width: imgWidth,
+                height: imgHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: imgWidth * 4,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return false
+            }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: imgWidth, height: imgHeight))
+            return true
+        }
+        XCTAssertTrue(didRasterize)
+
+        let scaleX = Double(imgWidth) / Double(max(1.0, view.bounds.width))
+        let scaleY = Double(imgHeight) / Double(max(1.0, view.bounds.height))
+        let localBox = rotatedText.textSelectionBox
+        var foundDashedLightBlueBorder = false
+        for step in 2...18 {
+            let fraction = CGFloat(step) / 20.0
+            let localEdgePoint = CGPoint(
+                x: localBox.minX + localBox.width * fraction,
+                y: localBox.maxY
+            )
+            let worldEdgePoint = rotatedText.fromTextLocalSpace(localEdgePoint)
+            let edgePxX = Int((Double(worldEdgePoint.x) * scaleX).rounded())
+            let edgePxY = Int((Double(view.bounds.height - worldEdgePoint.y) * scaleY).rounded())
+            for dy in -2...2 {
+                for dx in -2...2 {
+                    let pxX = edgePxX + dx
+                    let pxY = edgePxY + dy
+                    let inX = pxX >= 0 && pxX < imgWidth
+                    let inY = pxY >= 0 && pxY < imgHeight
+                    guard inX && inY else { continue }
+                    let offset = (pxY * imgWidth + pxX) * 4
+                    let r = bytes[offset]
+                    let b = bytes[offset + 2]
+                    let a = bytes[offset + 3]
+                    let isBlueOverRed = Int(b) > Int(r) + 60
+                    let isVisibleStroke = a >= 80 && b >= 120
+                    if isBlueOverRed && isVisibleStroke {
+                        foundDashedLightBlueBorder = true
+                    }
+                }
+            }
+        }
+        XCTAssertTrue(foundDashedLightBlueBorder)
+
+        let rotHandle = rotatedText.worldTextRotationHandleCenter
+        let rotPxX = Int((Double(rotHandle.x) * scaleX).rounded())
+        let rotPxY = Int((Double(view.bounds.height - rotHandle.y) * scaleY).rounded())
+        var maxRotationHandleAlpha: UInt8 = 0
+        for dy in -4...4 {
+            for dx in -4...4 {
+                let pxX = rotPxX + dx
+                let pxY = rotPxY + dy
+                let inX = pxX >= 0 && pxX < imgWidth
+                let inY = pxY >= 0 && pxY < imgHeight
+                guard inX && inY else { continue }
+                let offset = (pxY * imgWidth + pxX) * 4
+                let a = bytes[offset + 3]
+                if a > maxRotationHandleAlpha {
+                    maxRotationHandleAlpha = a
+                }
+            }
+        }
+        XCTAssertEqual(maxRotationHandleAlpha, 0)
+
+        var foundAnyCornerWhiteFill = false
+        for corner in rotatedText.worldTextScaleHandleCenters {
+            let cornerPxX = Int((Double(corner.x) * scaleX).rounded())
+            let cornerPxY = Int((Double(view.bounds.height - corner.y) * scaleY).rounded())
+            let inX = cornerPxX >= 0 && cornerPxX < imgWidth
+            let inY = cornerPxY >= 0 && cornerPxY < imgHeight
+            guard inX && inY else { continue }
+            let offset = (cornerPxY * imgWidth + cornerPxX) * 4
+            let r = bytes[offset]
+            let g = bytes[offset + 1]
+            let b = bytes[offset + 2]
+            let a = bytes[offset + 3]
+            let isWhiteRG = r >= 235 && g >= 235
+            let isOpaqueWhite = b >= 235 && a >= 245
+            if isWhiteRG && isOpaqueWhite {
+                foundAnyCornerWhiteFill = true
+            }
+        }
+        XCTAssertFalse(foundAnyCornerWhiteFill)
+    }
+
+    func testOrphanedDragScaleAndRotateRecoverOnResignKeyAndNextMouseDownWithoutMouseUp() {
+        let settings = AppSettings(defaults: testDefaults)
+        settings.annotateSaveSession = false
+        settings.currentDrawMode = .text
+        let shortcuts = ShortcutManager(defaults: testDefaults)
+        let canvas = AnnotationCanvasState()
+        let overlay = AnnotateOverlayController(settings: settings, shortcutManager: shortcuts, canvasState: canvas)
+
+        let textItem = AnnotationItem(
+            mode: .text,
+            startPoint: CGPoint(x: 140, y: 150),
+            endPoint: CGPoint(x: 140, y: 150),
+            strokeColor: .white,
+            text: "Orphan Recovery",
+            fontSize: 24.0
+        )
+        canvas.annotations = [textItem]
+        canvas.selectedIDs = [textItem.id]
+
+        overlay.showAnnotation()
+        guard let panel = overlay.panel, let view = overlay.canvasView else {
+            XCTFail("Expected overlay panel and canvasView")
+            return
+        }
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertTrue(settings.isAnnotating)
+
+        let moveStart = canvas.annotations[0].textCenter
+        let moveMid = CGPoint(x: moveStart.x + 24, y: moveStart.y + 14)
+        let undoBeforeMoveResign = canvas.undoStack.count
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: moveStart), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: moveMid), in: panel))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeMoveResign + 1)
+
+        panel.resignKey()
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertTrue(settings.isAnnotating)
+        XCTAssertEqual(canvas.selectedIDs, [textItem.id])
+
+        canvas.moveSelectedAnnotations(by: CGSize(width: 10, height: -6))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeMoveResign + 2)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].fontSize, 26.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeMoveResign + 3)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].fontSize, 24.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeMoveResign + 4)
+
+        let scaleHandle = canvas.annotations[0].worldTextScaleHandleCenters[2]
+        let scaleCenter = canvas.annotations[0].textCenter
+        let scaleDragPt = CGPoint(
+            x: scaleCenter.x + (scaleHandle.x - scaleCenter.x) * 1.35,
+            y: scaleCenter.y + (scaleHandle.y - scaleCenter.y) * 1.35
+        )
+        let undoBeforeScaleResign = canvas.undoStack.count
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: scaleHandle), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: scaleDragPt), in: panel))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeScaleResign + 1)
+
+        panel.resignKey()
+        XCTAssertTrue(panel.isVisible)
+        canvas.moveSelectedAnnotations(by: CGSize(width: -8, height: 4))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeScaleResign + 2)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x21, modifiers: 0))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeScaleResign + 3)
+
+        let rotHandle = canvas.annotations[0].worldTextRotationHandleCenter
+        let rotCenter = canvas.annotations[0].textCenter
+        let rotDragPt = CGPoint(x: rotCenter.x + 48, y: rotCenter.y)
+        let undoBeforeRotateResign = canvas.undoStack.count
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: rotHandle), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: rotDragPt), in: panel))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeRotateResign + 1)
+
+        panel.resignKey()
+        XCTAssertTrue(panel.isVisible)
+        canvas.moveSelectedAnnotations(by: CGSize(width: 6, height: 6))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeRotateResign + 2)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeRotateResign + 3)
+
+        settings.currentDrawMode = .freeHand
+        canvas.selectedIDs = [textItem.id]
+        let orphanMoveStart = canvas.annotations[0].textCenter
+        let orphanMoveMid = CGPoint(x: orphanMoveStart.x + 15, y: orphanMoveStart.y + 10)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: orphanMoveStart), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: orphanMoveMid), in: panel))
+        let frozenAfterMove = canvas.annotations[0]
+        let undoAfterInterruptedMove = canvas.undoStack.count
+
+        let strokeAStart = CGPoint(x: 24, y: 28)
+        let strokeAMid = CGPoint(x: 64, y: 52)
+        let strokeAEnd = CGPoint(x: 96, y: 74)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: strokeAStart), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: strokeAMid), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: strokeAEnd), in: panel))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: strokeAEnd), in: panel))
+
+        XCTAssertEqual(canvas.annotations[0].startPoint, frozenAfterMove.startPoint)
+        XCTAssertEqual(canvas.annotations[0].fontSize, frozenAfterMove.fontSize, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, frozenAfterMove.rotationRadians, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations.count, 2)
+        XCTAssertEqual(canvas.annotations[1].mode, .freeHand)
+        XCTAssertNil(canvas.activeDraft)
+        XCTAssertEqual(canvas.undoStack.count, undoAfterInterruptedMove + 1)
+
+        canvas.selectedIDs = [textItem.id]
+        let orphanCorner = canvas.annotations[0].worldTextScaleHandleCenters[0]
+        let centerBeforeOrphanScale = canvas.annotations[0].textCenter
+        let orphanCornerOut = CGPoint(
+            x: centerBeforeOrphanScale.x + (orphanCorner.x - centerBeforeOrphanScale.x) * 1.25,
+            y: centerBeforeOrphanScale.y + (orphanCorner.y - centerBeforeOrphanScale.y) * 1.25
+        )
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: orphanCorner), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: orphanCornerOut), in: panel))
+        let frozenAfterScale = canvas.annotations[0]
+        let countAfterScale = canvas.annotations.count
+        let undoAfterInterruptedScale = canvas.undoStack.count
+
+        let strokeBStart = CGPoint(x: 20, y: 300)
+        let strokeBMid = CGPoint(x: 70, y: 320)
+        let strokeBEnd = CGPoint(x: 105, y: 330)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: strokeBStart), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: strokeBMid), in: panel))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: strokeBEnd), in: panel))
+
+        XCTAssertEqual(canvas.annotations[0].startPoint, frozenAfterScale.startPoint)
+        XCTAssertEqual(canvas.annotations[0].fontSize, frozenAfterScale.fontSize, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, frozenAfterScale.rotationRadians, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations.count, countAfterScale + 1)
+        XCTAssertEqual(canvas.annotations.last?.mode, .freeHand)
+        XCTAssertNil(canvas.activeDraft)
+        XCTAssertEqual(canvas.undoStack.count, undoAfterInterruptedScale + 1)
+
+        canvas.selectedIDs = [textItem.id]
+        let orphanRot = canvas.annotations[0].worldTextRotationHandleCenter
+        let centerBeforeOrphanRot = canvas.annotations[0].textCenter
+        let orphanRotOut = CGPoint(x: centerBeforeOrphanRot.x - 45, y: centerBeforeOrphanRot.y + 20)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: orphanRot), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: orphanRotOut), in: panel))
+        let frozenAfterRotate = canvas.annotations[0]
+        let countAfterRotate = canvas.annotations.count
+        let undoAfterInterruptedRotate = canvas.undoStack.count
+
+        let strokeCStart = CGPoint(x: 300, y: 25)
+        let strokeCMid = CGPoint(x: 345, y: 45)
+        let strokeCEnd = CGPoint(x: 380, y: 60)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: strokeCStart), in: panel))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: strokeCMid), in: panel))
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: strokeCEnd), in: panel))
+
+        XCTAssertEqual(canvas.annotations[0].startPoint, frozenAfterRotate.startPoint)
+        XCTAssertEqual(canvas.annotations[0].fontSize, frozenAfterRotate.fontSize, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].rotationRadians, frozenAfterRotate.rotationRadians, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations.count, countAfterRotate + 1)
+        XCTAssertEqual(canvas.annotations.last?.mode, .freeHand)
+        XCTAssertNil(canvas.activeDraft)
+        XCTAssertEqual(canvas.undoStack.count, undoAfterInterruptedRotate + 1)
+
+        canvas.selectedIDs = [textItem.id]
+        let rightClickStart = canvas.annotations[0].textCenter
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: rightClickStart), in: panel))
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: CGPoint(x: rightClickStart.x + 8, y: rightClickStart.y + 8)),
+                in: panel
+            )
+        )
+        let undoAfterRightClickDrag = canvas.undoStack.count
+        view.rightMouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .rightMouseDown, location: rightClickStart), in: panel))
+        canvas.moveSelectedAnnotations(by: CGSize(width: 4, height: 4))
+        XCTAssertEqual(canvas.undoStack.count, undoAfterRightClickDrag + 1)
+
+        let hoverCleanupStart = canvas.annotations[0].textCenter
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: hoverCleanupStart), in: panel))
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: CGPoint(x: hoverCleanupStart.x + 6, y: hoverCleanupStart.y - 6)),
+                in: panel
+            )
+        )
+        let undoAfterHoverDrag = canvas.undoStack.count
+        view.mouseMoved(with: makeMouseEvent(SyntheticMouseSpec(type: .mouseMoved, location: CGPoint(x: 15, y: 15)), in: panel))
+        canvas.moveSelectedAnnotations(by: CGSize(width: 4, height: 4))
+        XCTAssertEqual(canvas.undoStack.count, undoAfterHoverDrag + 1)
+
+        let deactivateStart = canvas.annotations[0].textCenter
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: deactivateStart), in: panel))
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: CGPoint(x: deactivateStart.x - 6, y: deactivateStart.y + 6)),
+                in: panel
+            )
+        )
+        let undoAfterDeactivateDrag = canvas.undoStack.count
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        canvas.moveSelectedAnnotations(by: CGSize(width: 4, height: 4))
+        XCTAssertEqual(canvas.undoStack.count, undoAfterDeactivateDrag + 1)
+
+        overlay.hideAnnotation()
+    }
 }

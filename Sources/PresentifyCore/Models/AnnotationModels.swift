@@ -294,7 +294,65 @@ public enum GradientGenerator {
     }
 }
 
+private final class TextLayoutMeasureCache: @unchecked Sendable {
+    struct Key: Hashable, Sendable {
+        let text: String
+        let fontName: String
+        let fontSizeCentipoints: Int
+    }
+
+    static let shared = TextLayoutMeasureCache()
+    private static let maxEntries = 256
+
+    private let lock = NSLock()
+    private var entries: [Key: CGSize] = [:]
+    private var insertionOrder: [Key] = []
+
+    func measuredSize(for key: Key) -> CGSize {
+        lock.lock()
+        if let cached = entries[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let pointSize = CGFloat(key.fontSizeCentipoints) / 100.0
+        let font = NSFont(name: key.fontName, size: pointSize)
+            ?? NSFont.systemFont(ofSize: pointSize, weight: .semibold)
+        let rawMeasured = (key.text as NSString).size(withAttributes: [.font: font])
+        let rawWidth = Double(rawMeasured.width)
+        let rawHeight = Double(rawMeasured.height)
+        let width = rawWidth.isFinite ? max(24.0, ceil(rawWidth)) : 24.0
+        let fallbackHeight = max(20.0, ceil(Double(pointSize) * 1.2))
+        let height = rawHeight.isFinite ? max(20.0, ceil(rawHeight)) : fallbackHeight
+        let resolved = CGSize(width: width, height: height)
+
+        lock.lock()
+        if entries[key] == nil {
+            if insertionOrder.count >= Self.maxEntries {
+                let evicted = insertionOrder.removeFirst()
+                entries.removeValue(forKey: evicted)
+            }
+            insertionOrder.append(key)
+        }
+        entries[key] = resolved
+        lock.unlock()
+        return resolved
+    }
+}
+
 public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
+    public static let maxTextLength = 2_048
+
+    public static func clampText(_ raw: String) -> String {
+        raw.count > maxTextLength ? String(raw.prefix(maxTextLength)) : raw
+    }
+
+    public static func sanitizeFontSize(_ raw: Double) -> Double {
+        guard raw.isFinite else { return 24.0 }
+        return min(max(raw, 8.0), 200.0)
+    }
+
     public var id: UUID
     public var mode: DrawMode
     public var points: [CGPoint]
@@ -314,6 +372,30 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
     public var blurStyle: BlurStyle? = nil
     public var blurOpacity: Double? = nil
     public var blurTintColor: RGBColor? = nil
+    public var rotationRadians: Double = 0.0
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case mode
+        case points
+        case startPoint
+        case endPoint
+        case isConstrained
+        case isFilled
+        case strokeColor
+        case gradientPair
+        case lineWeight
+        case isHighlighter
+        case isAutoErase
+        case createdAt
+        case text
+        case fontName
+        case fontSize
+        case blurStyle
+        case blurOpacity
+        case blurTintColor
+        case rotationRadians
+    }
 
     public init(
         id: UUID = UUID(),
@@ -334,7 +416,8 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         fontSize: Double = 24.0,
         blurStyle: BlurStyle? = nil,
         blurOpacity: Double? = nil,
-        blurTintColor: RGBColor? = nil
+        blurTintColor: RGBColor? = nil,
+        rotationRadians: Double = 0.0
     ) {
         self.id = id
         self.mode = mode
@@ -349,12 +432,61 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         self.isHighlighter = isHighlighter
         self.isAutoErase = isAutoErase
         self.createdAt = createdAt
-        self.text = text
+        self.text = Self.clampText(text)
         self.fontName = fontName
-        self.fontSize = fontSize
+        self.fontSize = Self.sanitizeFontSize(fontSize)
         self.blurStyle = blurStyle
         self.blurOpacity = blurOpacity
         self.blurTintColor = blurTintColor
+        self.rotationRadians = AnnotationCanvasState.sanitizeRotationRadians(rotationRadians)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.mode = try container.decode(DrawMode.self, forKey: .mode)
+        self.points = try container.decode([CGPoint].self, forKey: .points)
+        self.startPoint = try container.decode(CGPoint.self, forKey: .startPoint)
+        self.endPoint = try container.decode(CGPoint.self, forKey: .endPoint)
+        self.isConstrained = try container.decode(Bool.self, forKey: .isConstrained)
+        self.isFilled = try container.decode(Bool.self, forKey: .isFilled)
+        self.strokeColor = try container.decode(RGBColor.self, forKey: .strokeColor)
+        self.gradientPair = try container.decodeIfPresent(GradientPair.self, forKey: .gradientPair)
+        self.lineWeight = try container.decode(Double.self, forKey: .lineWeight)
+        self.isHighlighter = try container.decode(Bool.self, forKey: .isHighlighter)
+        self.isAutoErase = try container.decode(Bool.self, forKey: .isAutoErase)
+        self.createdAt = try container.decode(TimeInterval.self, forKey: .createdAt)
+        self.text = try container.decode(String.self, forKey: .text)
+        self.fontName = try container.decode(String.self, forKey: .fontName)
+        self.fontSize = try container.decode(Double.self, forKey: .fontSize)
+        self.blurStyle = try container.decodeIfPresent(BlurStyle.self, forKey: .blurStyle)
+        self.blurOpacity = try container.decodeIfPresent(Double.self, forKey: .blurOpacity)
+        self.blurTintColor = try container.decodeIfPresent(RGBColor.self, forKey: .blurTintColor)
+        self.rotationRadians = try container.decodeIfPresent(Double.self, forKey: .rotationRadians) ?? 0.0
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(points, forKey: .points)
+        try container.encode(startPoint, forKey: .startPoint)
+        try container.encode(endPoint, forKey: .endPoint)
+        try container.encode(isConstrained, forKey: .isConstrained)
+        try container.encode(isFilled, forKey: .isFilled)
+        try container.encode(strokeColor, forKey: .strokeColor)
+        try container.encodeIfPresent(gradientPair, forKey: .gradientPair)
+        try container.encode(lineWeight, forKey: .lineWeight)
+        try container.encode(isHighlighter, forKey: .isHighlighter)
+        try container.encode(isAutoErase, forKey: .isAutoErase)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(text, forKey: .text)
+        try container.encode(fontName, forKey: .fontName)
+        try container.encode(fontSize, forKey: .fontSize)
+        try container.encodeIfPresent(blurStyle, forKey: .blurStyle)
+        try container.encodeIfPresent(blurOpacity, forKey: .blurOpacity)
+        try container.encodeIfPresent(blurTintColor, forKey: .blurTintColor)
+        try container.encode(rotationRadians, forKey: .rotationRadians)
     }
 
     public var effectiveBlurStyle: BlurStyle {
@@ -368,6 +500,121 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         return min(max(raw, 0.10), 1.00)
     }
 
+    public var effectiveRotationRadians: Double {
+        rotationRadians.isFinite ? rotationRadians : 0.0
+    }
+
+    public var textLayoutRect: CGRect {
+        let safeFontSize = Self.sanitizeFontSize(fontSize)
+        let centipoints = Int((safeFontSize * 100.0).rounded())
+        let boundedText = Self.clampText(text)
+        let boundedFontName = fontName.count > 256 ? String(fontName.prefix(256)) : fontName
+        let cacheKey = TextLayoutMeasureCache.Key(
+            text: boundedText,
+            fontName: boundedFontName,
+            fontSizeCentipoints: centipoints
+        )
+        let size = TextLayoutMeasureCache.shared.measuredSize(for: cacheKey)
+        return CGRect(x: Double(startPoint.x), y: Double(startPoint.y), width: size.width, height: size.height)
+    }
+
+    public var textSelectionBox: CGRect {
+        textLayoutRect.insetBy(dx: -4.0, dy: -4.0)
+    }
+
+    public var textCenter: CGPoint {
+        let rect = textLayoutRect
+        return CGPoint(x: rect.midX, y: rect.midY)
+    }
+
+    public var localTextScaleHandleCenters: [CGPoint] {
+        let box = textSelectionBox
+        return [
+            CGPoint(x: box.minX, y: box.minY),
+            CGPoint(x: box.maxX, y: box.minY),
+            CGPoint(x: box.maxX, y: box.maxY),
+            CGPoint(x: box.minX, y: box.maxY)
+        ]
+    }
+
+    public var localTextRotationHandleCenter: CGPoint {
+        let box = textSelectionBox
+        return CGPoint(x: box.midX, y: box.maxY + 22.0)
+    }
+
+    public var worldTextScaleHandleCenters: [CGPoint] {
+        localTextScaleHandleCenters.map(fromTextLocalSpace)
+    }
+
+    public var worldTextRotationHandleCenter: CGPoint {
+        fromTextLocalSpace(localTextRotationHandleCenter)
+    }
+
+    public func toTextLocalSpace(_ point: CGPoint) -> CGPoint {
+        let angle = effectiveRotationRadians
+        guard angle != 0.0 else { return point }
+        let center = textCenter
+        let hasFiniteCenter = center.x.isFinite && center.y.isFinite
+        guard hasFiniteCenter else { return point }
+        let dx = Double(point.x - center.x)
+        let dy = Double(point.y - center.y)
+        let cosAngle = cos(angle)
+        let sinAngle = sin(angle)
+        return CGPoint(
+            x: Double(center.x) + dx * cosAngle + dy * sinAngle,
+            y: Double(center.y) - dx * sinAngle + dy * cosAngle
+        )
+    }
+
+    public func fromTextLocalSpace(_ point: CGPoint) -> CGPoint {
+        let angle = effectiveRotationRadians
+        guard angle != 0.0 else { return point }
+        let center = textCenter
+        let hasFiniteCenter = center.x.isFinite && center.y.isFinite
+        guard hasFiniteCenter else { return point }
+        let dx = Double(point.x - center.x)
+        let dy = Double(point.y - center.y)
+        let cosAngle = cos(angle)
+        let sinAngle = sin(angle)
+        return CGPoint(
+            x: Double(center.x) + dx * cosAngle - dy * sinAngle,
+            y: Double(center.y) + dx * sinAngle + dy * cosAngle
+        )
+    }
+
+    public func intersectsMarquee(_ marquee: CGRect) -> Bool {
+        guard marquee.intersects(boundingRect) else { return false }
+        guard effectiveRotationRadians != 0.0 else { return true }
+        let localCorners = [
+            CGPoint(x: marquee.minX, y: marquee.minY),
+            CGPoint(x: marquee.maxX, y: marquee.minY),
+            CGPoint(x: marquee.maxX, y: marquee.maxY),
+            CGPoint(x: marquee.minX, y: marquee.maxY)
+        ].map(toTextLocalSpace)
+        let xs = localCorners.map(\.x)
+        let ys = localCorners.map(\.y)
+        guard let minX = xs.min(), let maxX = xs.max() else { return false }
+        guard let minY = ys.min(), let maxY = ys.max() else { return false }
+        let localMarqueeBounds = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        return localMarqueeBounds.intersects(textLayoutRect)
+    }
+
+    public func withCenteredFontSize(_ newSize: Double, center: CGPoint) -> AnnotationItem {
+        var updated = self
+        updated.fontSize = Self.sanitizeFontSize(newSize)
+        let hasFiniteCenter = center.x.isFinite && center.y.isFinite
+        guard hasFiniteCenter else { return updated }
+        let measuredRect = updated.textLayoutRect
+        let newOrigin = CGPoint(
+            x: center.x - measuredRect.width * 0.5,
+            y: center.y - measuredRect.height * 0.5
+        )
+        updated.startPoint = newOrigin
+        updated.endPoint = newOrigin
+        updated.points = [newOrigin]
+        return updated
+    }
+
     public var boundingRect: CGRect {
         switch mode {
         case .rectangle, .circle, .blur:
@@ -378,10 +625,22 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
             )
             return CGRect(x: ceRect.x, y: ceRect.y, width: ceRect.width, height: ceRect.height)
         case .text:
-            let charCount = max(1, text.count)
-            let estimatedWidth = max(60.0, Double(charCount) * fontSize * 0.62)
-            let estimatedHeight = max(28.0, fontSize * 1.4)
-            return CGRect(x: Double(startPoint.x), y: Double(startPoint.y), width: estimatedWidth, height: estimatedHeight)
+            let layoutRect = textLayoutRect
+            let angle = effectiveRotationRadians
+            guard angle != 0.0 else { return layoutRect }
+            let hasFiniteOrigin = layoutRect.origin.x.isFinite && layoutRect.origin.y.isFinite
+            guard hasFiniteOrigin else { return layoutRect }
+            let corners = [
+                CGPoint(x: layoutRect.minX, y: layoutRect.minY),
+                CGPoint(x: layoutRect.maxX, y: layoutRect.minY),
+                CGPoint(x: layoutRect.maxX, y: layoutRect.maxY),
+                CGPoint(x: layoutRect.minX, y: layoutRect.maxY)
+            ].map(fromTextLocalSpace)
+            let xs = corners.map(\.x)
+            let ys = corners.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max() else { return layoutRect }
+            guard let minY = ys.min(), let maxY = ys.max() else { return layoutRect }
+            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
         case .arrow:
             let cePoints = [
                 CEPoint(x: Double(startPoint.x), y: Double(startPoint.y)),
@@ -424,6 +683,10 @@ public final class AnnotationCanvasState: ObservableObject {
     @Published public private(set) var pasteCount: Int = 0
     @Published public private(set) var undoStack: [[AnnotationItem]] = []
     @Published public private(set) var redoStack: [[AnnotationItem]] = []
+
+    private var isInteractiveTransformActive = false
+    private var didRecordInteractiveSnapshot = false
+    private var interactiveTextCenters: [UUID: CGPoint] = [:]
 
     public init() {}
 
@@ -563,17 +826,22 @@ public final class AnnotationCanvasState: ObservableObject {
         isAutoErase: Bool = false,
         now: TimeInterval = Date().timeIntervalSince1970
     ) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasFinitePoint = point.x.isFinite && point.y.isFinite
+        guard hasFinitePoint else { return }
+        let boundedText = AnnotationItem.clampText(text)
+        let safeFontSize = AnnotationItem.sanitizeFontSize(fontSize)
+        let trimmed = boundedText.trimmingCharacters(in: .whitespacesAndNewlines)
         if let existingID = id, let index = annotations.firstIndex(where: { $0.id == existingID }) {
             recordUndoSnapshot()
             if trimmed.isEmpty {
                 annotations.remove(at: index)
                 selectedIDs.remove(existingID)
             } else {
-                annotations[index].text = text
+                annotations[index].text = boundedText
                 annotations[index].strokeColor = color
                 annotations[index].fontName = fontName
-                annotations[index].fontSize = fontSize
+                annotations[index].fontSize = safeFontSize
+                annotations[index].rotationRadians = Self.sanitizeRotationRadians(annotations[index].rotationRadians)
                 annotations[index].createdAt = now
             }
             return
@@ -591,9 +859,9 @@ public final class AnnotationCanvasState: ObservableObject {
             lineWeight: 2.0,
             isAutoErase: isAutoErase,
             createdAt: now,
-            text: text,
+            text: boundedText,
             fontName: fontName,
-            fontSize: fontSize
+            fontSize: safeFontSize
         )
         annotations.append(item)
     }
@@ -621,14 +889,16 @@ public final class AnnotationCanvasState: ObservableObject {
                     return item.id
                 }
             case .text:
-                let bounds = item.boundingRect
+                let layoutRect = item.textLayoutRect
+                let localPoint = item.toTextLocalSpace(point)
+                let ceLocalPoint = CEPoint(x: Double(localPoint.x), y: Double(localPoint.y))
                 let rect = CERect(
-                    x: Double(bounds.origin.x),
-                    y: Double(bounds.origin.y),
-                    width: Double(bounds.size.width),
-                    height: Double(bounds.size.height)
+                    x: Double(layoutRect.origin.x),
+                    y: Double(layoutRect.origin.y),
+                    width: Double(layoutRect.size.width),
+                    height: Double(layoutRect.size.height)
                 )
-                if ce_hit_test_rect(rect, true, 2.0, testPoint, tolerance) {
+                if ce_hit_test_rect(rect, true, 2.0, ceLocalPoint, tolerance) {
                     return item.id
                 }
             case .arrow:
@@ -676,7 +946,11 @@ public final class AnnotationCanvasState: ObservableObject {
                 if intersects {
                     matched.insert(item.id)
                 }
-            case .rectangle, .circle, .text, .blur:
+            case .text:
+                if item.intersectsMarquee(normalized) {
+                    matched.insert(item.id)
+                }
+            case .rectangle, .circle, .blur:
                 if normalized.intersects(item.boundingRect) {
                     matched.insert(item.id)
                 }
@@ -701,11 +975,35 @@ public final class AnnotationCanvasState: ObservableObject {
         }
     }
 
-    public func moveSelectedAnnotations(by delta: CGSize) {
-        let hasNonZeroDelta = delta.width != 0 || delta.height != 0
-        guard !selectedIDs.isEmpty, hasNonZeroDelta else { return }
+    public var hasSelectedTextAnnotations: Bool {
+        annotations.contains { item in
+            let isSelected = selectedIDs.contains(item.id)
+            return isSelected && item.mode == .text
+        }
+    }
 
-        recordUndoSnapshot()
+    public func beginInteractiveTransform() {
+        isInteractiveTransformActive = true
+        didRecordInteractiveSnapshot = false
+        interactiveTextCenters.removeAll()
+        for item in annotations where item.mode == .text {
+            interactiveTextCenters[item.id] = item.textCenter
+        }
+    }
+
+    public func endInteractiveTransform() {
+        isInteractiveTransformActive = false
+        didRecordInteractiveSnapshot = false
+        interactiveTextCenters.removeAll()
+    }
+
+    public func moveSelectedAnnotations(by delta: CGSize) {
+        let hasFiniteDelta = delta.width.isFinite && delta.height.isFinite
+        guard hasFiniteDelta else { return }
+        let hasNonZeroDelta = delta.width != 0 || delta.height != 0
+        guard !selectedIDs.isEmpty && hasNonZeroDelta else { return }
+
+        recordTransformUndoSnapshotIfNeeded()
         for index in annotations.indices where selectedIDs.contains(annotations[index].id) {
             annotations[index].startPoint.x += delta.width
             annotations[index].startPoint.y += delta.height
@@ -713,6 +1011,124 @@ public final class AnnotationCanvasState: ObservableObject {
             annotations[index].endPoint.y += delta.height
             annotations[index].points = annotations[index].points.map {
                 CGPoint(x: $0.x + delta.width, y: $0.y + delta.height)
+            }
+        }
+    }
+
+    public func scaleTextAnnotation(_ id: UUID, toFontSize fontSize: Double) {
+        guard fontSize.isFinite else { return }
+        guard let index = annotations.firstIndex(where: { $0.id == id }) else { return }
+        guard annotations[index].mode == .text else { return }
+
+        let clampedSize = AnnotationItem.sanitizeFontSize(fontSize)
+        let fixedCenter = interactiveTextCenters[id] ?? annotations[index].textCenter
+        let updated = annotations[index].withCenteredFontSize(clampedSize, center: fixedCenter)
+        let currentSize = annotations[index].fontSize
+        let didRepairSize = !currentSize.isFinite
+        let didChangeSize = didRepairSize || abs(currentSize - updated.fontSize) > 1e-6
+        let didChangeOrigin = annotations[index].startPoint != updated.startPoint
+        guard didChangeSize || didChangeOrigin else { return }
+
+        recordTransformUndoSnapshotIfNeeded()
+        annotations[index] = updated
+    }
+
+    public func scaleSelectedTextAnnotations(by factor: Double) {
+        let isValidFactor = factor.isFinite && factor > 0
+        guard isValidFactor && !selectedIDs.isEmpty else { return }
+
+        let willChange = annotations.contains { item in
+            let isSelectedText = selectedIDs.contains(item.id) && item.mode == .text
+            guard isSelectedText else { return false }
+            let isCurrentFinite = item.fontSize.isFinite
+            let baseSize = AnnotationItem.sanitizeFontSize(item.fontSize)
+            let rawScaled = baseSize * factor
+            let clamped = rawScaled.isFinite ? min(max(rawScaled, 8.0), 200.0) : 200.0
+            if !isCurrentFinite {
+                return true
+            }
+            return abs(clamped - item.fontSize) > 1e-6
+        }
+        guard willChange else { return }
+
+        recordTransformUndoSnapshotIfNeeded()
+        for index in annotations.indices {
+            let item = annotations[index]
+            let isSelectedText = selectedIDs.contains(item.id) && item.mode == .text
+            guard isSelectedText else { continue }
+            let baseSize = AnnotationItem.sanitizeFontSize(item.fontSize)
+            let rawScaled = baseSize * factor
+            let nextSize = rawScaled.isFinite ? min(max(rawScaled, 8.0), 200.0) : 200.0
+            let fixedCenter = interactiveTextCenters[item.id] ?? item.textCenter
+            annotations[index] = item.withCenteredFontSize(nextSize, center: fixedCenter)
+        }
+    }
+
+    @discardableResult
+    public func adjustSelectedTextFontSize(by delta: Double) -> Double? {
+        let isValidDelta = delta.isFinite && delta != 0
+        guard isValidDelta && !selectedIDs.isEmpty else { return nil }
+
+        var firstResultSize: Double?
+        var anyWillChange = false
+        for item in annotations {
+            let isSelectedText = selectedIDs.contains(item.id) && item.mode == .text
+            guard isSelectedText else { continue }
+            let isCurrentFinite = item.fontSize.isFinite
+            let baseSize = AnnotationItem.sanitizeFontSize(item.fontSize)
+            let rawSum = baseSize + delta
+            let clamped = rawSum.isFinite ? min(max(rawSum, 8.0), 200.0) : baseSize
+            if firstResultSize == nil {
+                firstResultSize = clamped
+            }
+            let sizeChanged = !isCurrentFinite || abs(clamped - item.fontSize) > 1e-6
+            if sizeChanged {
+                anyWillChange = true
+            }
+        }
+        guard let reportedSize = firstResultSize else { return nil }
+        guard anyWillChange else { return reportedSize }
+
+        recordTransformUndoSnapshotIfNeeded()
+        for index in annotations.indices {
+            let item = annotations[index]
+            let isSelectedText = selectedIDs.contains(item.id) && item.mode == .text
+            guard isSelectedText else { continue }
+            let baseSize = AnnotationItem.sanitizeFontSize(item.fontSize)
+            let rawSum = baseSize + delta
+            let nextSize = rawSum.isFinite ? min(max(rawSum, 8.0), 200.0) : baseSize
+            let fixedCenter = interactiveTextCenters[item.id] ?? item.textCenter
+            annotations[index] = item.withCenteredFontSize(nextSize, center: fixedCenter)
+        }
+        return reportedSize
+    }
+
+    public func setTextRotation(_ radians: Double, for id: UUID) {
+        guard radians.isFinite else { return }
+        guard let index = annotations.firstIndex(where: { $0.id == id }) else { return }
+        guard annotations[index].mode == .text else { return }
+        let normalized = Self.sanitizeRotationRadians(radians)
+        let currentRaw = annotations[index].rotationRadians
+        let isUnchanged = currentRaw.isFinite && abs(currentRaw - normalized) <= 1e-9
+        guard !isUnchanged else { return }
+
+        recordTransformUndoSnapshotIfNeeded()
+        annotations[index].rotationRadians = normalized
+    }
+
+    public func rotateSelectedTextAnnotations(by deltaRadians: Double) {
+        let isValidDelta = deltaRadians.isFinite && abs(deltaRadians) > 1e-9
+        guard isValidDelta && !selectedIDs.isEmpty else { return }
+        let normalizedDelta = Self.sanitizeRotationRadians(deltaRadians)
+        guard abs(normalizedDelta) > 1e-9 else { return }
+        guard hasSelectedTextAnnotations else { return }
+
+        recordTransformUndoSnapshotIfNeeded()
+        for index in annotations.indices {
+            let isSelectedText = selectedIDs.contains(annotations[index].id) && annotations[index].mode == .text
+            if isSelectedText {
+                let baseAngle = Self.sanitizeRotationRadians(annotations[index].effectiveRotationRadians)
+                annotations[index].rotationRadians = Self.sanitizeRotationRadians(baseAngle + normalizedDelta)
             }
         }
     }
@@ -770,6 +1186,7 @@ public final class AnnotationCanvasState: ObservableObject {
 
     public func deleteSelectedOrClearAll() {
         if !selectedIDs.isEmpty {
+            endInteractiveTransform()
             recordUndoSnapshot()
             annotations.removeAll { selectedIDs.contains($0.id) }
             selectedIDs.removeAll()
@@ -780,6 +1197,7 @@ public final class AnnotationCanvasState: ObservableObject {
     }
 
     public func clearAll() {
+        endInteractiveTransform()
         guard !annotations.isEmpty || activeDraft != nil else { return }
         if !annotations.isEmpty {
             recordUndoSnapshot()
@@ -801,6 +1219,7 @@ public final class AnnotationCanvasState: ObservableObject {
 
     public func pasteAnnotations(offsetStep: CGFloat = 20.0) {
         guard !copiedAnnotations.isEmpty else { return }
+        endInteractiveTransform()
         recordUndoSnapshot()
         pasteCount += 1
         let offset = CGFloat(pasteCount) * offsetStep
@@ -820,6 +1239,7 @@ public final class AnnotationCanvasState: ObservableObject {
     }
 
     public func undo() {
+        endInteractiveTransform()
         guard let previous = undoStack.popLast() else { return }
         redoStack.append(annotations)
         annotations = previous
@@ -828,6 +1248,7 @@ public final class AnnotationCanvasState: ObservableObject {
     }
 
     public func redo() {
+        endInteractiveTransform()
         guard let next = redoStack.popLast() else { return }
         undoStack.append(annotations)
         annotations = next
@@ -845,23 +1266,49 @@ public final class AnnotationCanvasState: ObservableObject {
         try? JSONEncoder().encode(annotations)
     }
 
+    public static func sanitizeRotationRadians(_ raw: Double) -> Double {
+        guard raw.isFinite else { return 0.0 }
+        let normalized = raw.remainder(dividingBy: 2.0 * .pi)
+        if normalized == 0.0 {
+            return 0.0
+        }
+        return normalized
+    }
+
     @discardableResult
     public func importSessionData(_ data: Data) -> Bool {
+        guard data.count <= 4_194_304 else { return false }
         guard let decoded = try? JSONDecoder().decode([AnnotationItem].self, from: data) else {
             return false
         }
+        guard decoded.count <= 2_000 else { return false }
         var sanitized: [AnnotationItem] = []
         sanitized.reserveCapacity(decoded.count)
         for var item in decoded {
-            for point in [item.startPoint, item.endPoint] + item.points {
+            let isWithinItemLimits = item.points.count <= 10_000 && item.text.count <= AnnotationItem.maxTextLength
+            guard isWithinItemLimits else {
+                return false
+            }
+            for point in [item.startPoint, item.endPoint] {
                 let isFinitePoint = point.x.isFinite && point.y.isFinite
                 let isWithinCoordRange = abs(point.x) <= 32_768.0 && abs(point.y) <= 32_768.0
                 guard isFinitePoint && isWithinCoordRange else {
                     return false
                 }
             }
+            for point in item.points {
+                let isFinitePoint = point.x.isFinite && point.y.isFinite
+                let isWithinCoordRange = abs(point.x) <= 32_768.0 && abs(point.y) <= 32_768.0
+                guard isFinitePoint && isWithinCoordRange else {
+                    return false
+                }
+            }
+            if item.fontName.count > 256 {
+                item.fontName = String(item.fontName.prefix(256))
+            }
             item.lineWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 1.0), 64.0) : 6.0
-            item.fontSize = item.fontSize.isFinite ? min(max(item.fontSize, 8.0), 200.0) : 24.0
+            item.fontSize = AnnotationItem.sanitizeFontSize(item.fontSize)
+            item.rotationRadians = Self.sanitizeRotationRadians(item.rotationRadians)
             if let rawOpacity = item.blurOpacity {
                 item.blurOpacity = rawOpacity.isFinite ? min(max(rawOpacity, 0.10), 1.00) : 0.55
             }
@@ -875,11 +1322,20 @@ public final class AnnotationCanvasState: ObservableObject {
             }
             sanitized.append(item)
         }
+        endInteractiveTransform()
         recordUndoSnapshot()
         annotations = sanitized
         selectedIDs.removeAll()
         selectionRectangle = nil
         return true
+    }
+
+    private func recordTransformUndoSnapshotIfNeeded() {
+        if isInteractiveTransformActive {
+            guard !didRecordInteractiveSnapshot else { return }
+            didRecordInteractiveSnapshot = true
+        }
+        recordUndoSnapshot()
     }
 
     private func recordUndoSnapshot() {
