@@ -301,6 +301,7 @@ public struct SettingsView: View {
                 )
 
                 Toggle("Annotation Tool Indicator", isOn: $settings.annotateToolIndicator)
+                Toggle("Fade Arrow Tail & Highlight Head", isOn: $settings.annotateArrowTailFade)
             }
 
             Section("Text Annotations") {

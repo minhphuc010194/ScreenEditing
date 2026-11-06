@@ -405,6 +405,36 @@ public struct AnnotateControlsView: View {
         adjustStrokeLineWeight(by: 2.0)
     }
 
+    public var showsTailFadeToggle: Bool {
+        if let canvasState {
+            let selectedItems = canvasState.annotations.filter { canvasState.selectedIDs.contains($0.id) }
+            if !selectedItems.isEmpty {
+                return selectedItems.contains { $0.usesDirectionalHandles }
+            }
+        }
+        let isFreeformMode = settings.currentDrawMode == .freeHand || settings.currentDrawMode == .highlighter
+        return settings.currentDrawMode == .arrow || isFreeformMode
+    }
+
+    public var isTailFadeToggleActive: Bool {
+        if let canvasState {
+            let selectedDirectional = canvasState.annotations.filter { item in
+                let isSelected = canvasState.selectedIDs.contains(item.id)
+                return isSelected && item.usesDirectionalHandles
+            }
+            if !selectedDirectional.isEmpty {
+                return selectedDirectional.allSatisfy(\.tailFadeEnabled)
+            }
+        }
+        return settings.annotateArrowTailFade
+    }
+
+    public func toggleArrowTailFade() {
+        let nextEnabled = !isTailFadeToggleActive
+        settings.annotateArrowTailFade = nextEnabled
+        canvasState?.applySelectedTailFade(nextEnabled ? .enabled : .disabled)
+    }
+
     public func selectFavoriteColor(at index: Int) {
         settings.selectFavoriteColor(index: index)
         let resolvedColor = settings.activeStrokeColor
@@ -754,6 +784,16 @@ public struct AnnotateControlsView: View {
                 .buttonStyle(.plain)
                 .contentShape(Rectangle())
                 .help("Increase Line Weight (])")
+
+                if showsTailFadeToggle {
+                    toolbarToggle(
+                        icon: "wand.and.rays",
+                        isActive: isTailFadeToggleActive,
+                        tooltip: "Fade Tail & Highlight Head"
+                    ) {
+                        toggleArrowTailFade()
+                    }
+                }
             }
         }
     }

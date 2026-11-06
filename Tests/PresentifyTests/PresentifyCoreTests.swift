@@ -4586,7 +4586,7 @@ final class PresentifyCoreTests: XCTestCase {
         )
         canvas.annotations = [diagonalArrow]
         canvas.selectedIDs = [diagonalArrow.id]
-        let diagTopRight = diagonalArrow.selectionScaleHandleCenters[2]
+        let diagTopRight = diagonalArrow.tipHandleCenter
         let undoBeforeDiagArrow = canvas.undoStack.count
         performMouseDrag(
             StrokeDragSpec(
@@ -4611,7 +4611,7 @@ final class PresentifyCoreTests: XCTestCase {
         )
         canvas.annotations = [horizontalArrow]
         canvas.selectedIDs = [horizontalArrow.id]
-        let horizHeadHandle = horizontalArrow.selectionScaleHandleCenters[2]
+        let horizHeadHandle = horizontalArrow.tipHandleCenter
         let undoBeforeHorizHead = canvas.undoStack.count
         performMouseDrag(
             StrokeDragSpec(
@@ -4627,7 +4627,7 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(canvas.annotations[0].endPoint.y, 200, accuracy: 1e-6)
 
         let anchoredHeadX = canvas.annotations[0].endPoint.x
-        let horizTailHandle = canvas.annotations[0].selectionScaleHandleCenters[0]
+        let horizTailHandle = canvas.annotations[0].tailHandleCenter
         performMouseDrag(
             StrokeDragSpec(
                 start: horizTailHandle,
@@ -4648,7 +4648,7 @@ final class PresentifyCoreTests: XCTestCase {
         )
         canvas.annotations = [verticalArrow]
         canvas.selectedIDs = [verticalArrow.id]
-        let vertHeadHandle = verticalArrow.selectionScaleHandleCenters[2]
+        let vertHeadHandle = verticalArrow.tipHandleCenter
         performMouseDrag(
             StrokeDragSpec(
                 start: vertHeadHandle,
@@ -5560,4 +5560,999 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertTrue(view.handleKeyCommand(keyCode: 0x06, modifiers: KeyBinding.commandMask | KeyBinding.shiftMask))
         XCTAssertEqual(canvas.annotations[1].lineWeight, 16.0, accuracy: 1e-6)
     }
+
+    func testDirectionalHandlesExposeThreeNonOverlappingGripsSnapEndpointsAndHitTestWidePolygons() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        settings.isWhiteboardActive = false
+        settings.dimScreenOnAnnotate = false
+        settings.annotateToolIndicator = false
+        let target = (window: window, view: view)
+
+        let thinStraightLine = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 60, y: 120), CGPoint(x: 120, y: 120)],
+            startPoint: CGPoint(x: 60, y: 120),
+            endPoint: CGPoint(x: 120, y: 120),
+            isConstrained: true,
+            strokeColor: .green,
+            lineWeight: 2.0
+        )
+        let straightHighlighter = AnnotationItem(
+            mode: .highlighter,
+            points: [CGPoint(x: 60, y: 160), CGPoint(x: 140, y: 160)],
+            startPoint: CGPoint(x: 60, y: 160),
+            endPoint: CGPoint(x: 140, y: 160),
+            isConstrained: true,
+            strokeColor: PresentifyCore.RGBColor.yellow.withAlpha(0.42),
+            lineWeight: 2.0,
+            isHighlighter: true
+        )
+        let curvedFreeHand = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 60, y: 60), CGPoint(x: 90, y: 80), CGPoint(x: 120, y: 65)],
+            startPoint: CGPoint(x: 60, y: 60),
+            endPoint: CGPoint(x: 120, y: 65),
+            strokeColor: .orange,
+            lineWeight: 4.0
+        )
+        let arrowItem = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 70, y: 140), CGPoint(x: 210, y: 140)],
+            startPoint: CGPoint(x: 70, y: 140),
+            endPoint: CGPoint(x: 210, y: 140),
+            strokeColor: .yellow,
+            lineWeight: 6.0
+        )
+
+        XCTAssertTrue(thinStraightLine.isConstrainedStraightLine)
+        XCTAssertTrue(thinStraightLine.usesDirectionalHandles)
+        XCTAssertTrue(straightHighlighter.isConstrainedStraightLine)
+        XCTAssertTrue(straightHighlighter.usesDirectionalHandles)
+        XCTAssertFalse(curvedFreeHand.isConstrainedStraightLine)
+        XCTAssertFalse(curvedFreeHand.usesDirectionalHandles)
+        XCTAssertFalse(arrowItem.isConstrainedStraightLine)
+        XCTAssertTrue(arrowItem.usesDirectionalHandles)
+
+        for directional in [arrowItem, thinStraightLine, straightHighlighter] {
+            let grips = directional.directionalHandleCenters
+            XCTAssertEqual(grips.count, 3)
+            let d01 = hypot(Double(grips[0].x - grips[1].x), Double(grips[0].y - grips[1].y))
+            let d12 = hypot(Double(grips[1].x - grips[2].x), Double(grips[1].y - grips[2].y))
+            let d02 = hypot(Double(grips[0].x - grips[2].x), Double(grips[0].y - grips[2].y))
+            XCTAssertGreaterThanOrEqual(d01, 12.0)
+            XCTAssertGreaterThanOrEqual(d12, 12.0)
+            XCTAssertGreaterThanOrEqual(d02, 12.0)
+        }
+
+        canvas.annotations = [arrowItem]
+        canvas.selectedIDs = [arrowItem.id]
+        guard let singleArrowRaster = rasterizeCanvasView(view),
+              let tailRGBA = singleArrowRaster.pixelRGBA(at: arrowItem.tailHandleCenter),
+              let tipRGBA = singleArrowRaster.pixelRGBA(at: arrowItem.tipHandleCenter),
+              let headGripRGBA = singleArrowRaster.pixelRGBA(at: arrowItem.headScaleHandleCenter) else {
+            XCTFail("Expected rasterized directional handles on single-selected arrow")
+            return
+        }
+        let tailBrightRG = tailRGBA.r >= 220 && tailRGBA.g >= 220
+        let tailBrightBA = tailRGBA.b >= 220 && tailRGBA.a >= 200
+        XCTAssertTrue(tailBrightRG && tailBrightBA)
+        let tipBrightRG = tipRGBA.r >= 220 && tipRGBA.g >= 220
+        let tipBrightBA = tipRGBA.b >= 220 && tipRGBA.a >= 200
+        XCTAssertTrue(tipBrightRG && tipBrightBA)
+        let isSkyBlueGrip = headGripRGBA.b >= 180 && Int(headGripRGBA.b) > Int(headGripRGBA.r) + 60
+        XCTAssertTrue(isSkyBlueGrip && headGripRGBA.a >= 180)
+
+        for py in 100...180 {
+            for px in 55...225 {
+                guard let sample = singleArrowRaster.pixelRGBA(at: CGPoint(x: px, y: py)) else { continue }
+                let hasHighRB = sample.r >= 110 && sample.b >= 140
+                let dominatesGreen = Int(sample.r) > Int(sample.g) + 45 && Int(sample.b) > Int(sample.g) + 45
+                XCTAssertFalse(hasHighRB && dominatesGreen)
+            }
+        }
+
+        canvas.annotations = [arrowItem, thinStraightLine]
+        canvas.selectedIDs = [arrowItem.id, thinStraightLine.id]
+        guard let multiDirRaster = rasterizeCanvasView(view) else {
+            XCTFail("Expected rasterized multi-selected directional items")
+            return
+        }
+        if let suppressedGrip = multiDirRaster.pixelRGBA(at: arrowItem.headScaleHandleCenter) {
+            let stillSkyBlue = suppressedGrip.b >= 180 && Int(suppressedGrip.b) > Int(suppressedGrip.r) + 60
+            XCTAssertFalse(stillSkyBlue && suppressedGrip.a >= 180)
+        }
+
+        let wideBoxArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 60, y: 150), CGPoint(x: 220, y: 150)],
+            startPoint: CGPoint(x: 60, y: 150),
+            endPoint: CGPoint(x: 220, y: 150),
+            strokeColor: .red,
+            lineWeight: 6.0,
+            headWidth: 96.0
+        )
+        canvas.annotations = [wideBoxArrow]
+        canvas.selectedIDs = [wideBoxArrow.id]
+        let unusedTopLeftCorner = wideBoxArrow.selectionScaleHandleCenters[3]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: unusedTopLeftCorner,
+                end: CGPoint(x: unusedTopLeftCorner.x - 20, y: unusedTopLeftCorner.y + 20)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.first?.id, wideBoxArrow.id)
+        XCTAssertEqual(canvas.annotations[0].startPoint, wideBoxArrow.startPoint)
+        XCTAssertEqual(canvas.annotations[0].endPoint, wideBoxArrow.endPoint)
+
+        canvas.annotations = [arrowItem]
+        canvas.selectedIDs = [arrowItem.id]
+        let undoBeforeRedirect = canvas.undoStack.count
+        performMouseDrag(
+            StrokeDragSpec(
+                start: arrowItem.tipHandleCenter,
+                end: CGPoint(x: 190, y: 215),
+                midpoints: [
+                    CGPoint(x: 205, y: 165),
+                    CGPoint(x: 198, y: 190)
+                ]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeRedirect + 1)
+        XCTAssertEqual(canvas.annotations[0].startPoint, CGPoint(x: 70, y: 140))
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, 190, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint.y, 215, accuracy: 1e-6)
+        canvas.undo()
+        XCTAssertEqual(canvas.annotations[0].endPoint, CGPoint(x: 210, y: 140))
+        canvas.redo()
+        XCTAssertEqual(canvas.annotations[0].endPoint, CGPoint(x: 190, y: 215))
+
+        canvas.selectedIDs = [arrowItem.id]
+        let currentTip = canvas.annotations[0].tipHandleCenter
+        performMouseDrag(
+            StrokeDragSpec(
+                start: currentTip,
+                end: CGPoint(x: 170, y: 232),
+                modifiers: [.shift]
+            ),
+            on: target
+        )
+        let snappedDX = canvas.annotations[0].endPoint.x - canvas.annotations[0].startPoint.x
+        let snappedDY = canvas.annotations[0].endPoint.y - canvas.annotations[0].startPoint.y
+        XCTAssertEqual(snappedDX, snappedDY, accuracy: 1e-5)
+
+        let anchoredTip = canvas.annotations[0].endPoint
+        performMouseDrag(
+            StrokeDragSpec(
+                start: canvas.annotations[0].tailHandleCenter,
+                end: CGPoint(x: anchoredTip.x - 110, y: anchoredTip.y + 8),
+                modifiers: [.shift]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, anchoredTip.x, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint.y, anchoredTip.y, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].startPoint.y, anchoredTip.y, accuracy: 1e-5)
+
+        let clampArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 100, y: 140), CGPoint(x: 200, y: 140)],
+            startPoint: CGPoint(x: 100, y: 140),
+            endPoint: CGPoint(x: 200, y: 140),
+            strokeColor: .blue,
+            lineWeight: 6.0
+        )
+        canvas.annotations = [clampArrow]
+        canvas.selectedIDs = [clampArrow.id]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: clampArrow.tipHandleCenter,
+                end: CGPoint(x: 102, y: 140)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].startPoint, CGPoint(x: 100, y: 140))
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, 108, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint.y, 140, accuracy: 1e-6)
+
+        performMouseDrag(
+            StrokeDragSpec(
+                start: canvas.annotations[0].tailHandleCenter,
+                end: CGPoint(x: 106, y: 140)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, 108, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].startPoint.x, 100, accuracy: 1e-6)
+
+        canvas.annotations = [thinStraightLine]
+        canvas.selectedIDs = [thinStraightLine.id]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: thinStraightLine.tipHandleCenter,
+                end: CGPoint(x: 165, y: 193)
+            ),
+            on: target
+        )
+        XCTAssertTrue(canvas.annotations[0].isConstrained)
+        XCTAssertTrue(canvas.annotations[0].isConstrainedStraightLine)
+        XCTAssertEqual(canvas.annotations[0].points, [CGPoint(x: 60, y: 120), CGPoint(x: 165, y: 193)])
+
+        let beforeCancelTip = canvas.annotations[0].tipHandleCenter
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: beforeCancelTip),
+                in: window
+            )
+        )
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: CGPoint(x: 210, y: 210)),
+                in: window
+            )
+        )
+        view.cancelActiveInteraction()
+        let postCancelPoint = canvas.annotations[0].endPoint
+        view.mouseDragged(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDragged, location: CGPoint(x: 250, y: 80)),
+                in: window
+            )
+        )
+        XCTAssertEqual(canvas.annotations[0].endPoint, postCancelPoint)
+
+        let hugeWingArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 60, y: 150), CGPoint(x: 260, y: 150)],
+            startPoint: CGPoint(x: 60, y: 150),
+            endPoint: CGPoint(x: 260, y: 150),
+            strokeColor: .red,
+            lineWeight: 6.0,
+            headWidth: 160.0
+        )
+        let hugeWedgeLine = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 60, y: 150), CGPoint(x: 260, y: 150)],
+            startPoint: CGPoint(x: 60, y: 150),
+            endPoint: CGPoint(x: 260, y: 150),
+            isConstrained: true,
+            strokeColor: .blue,
+            lineWeight: 6.0,
+            headWidth: 160.0
+        )
+        XCTAssertGreaterThanOrEqual(hugeWingArrow.boundingRect.height, 159.0)
+        XCTAssertGreaterThanOrEqual(hugeWedgeLine.boundingRect.height, 159.0)
+
+        canvas.annotations = [hugeWingArrow]
+        XCTAssertEqual(canvas.hitTestAnnotation(at: CGPoint(x: 180, y: 195), tolerance: 2.0), hugeWingArrow.id)
+        XCTAssertNil(canvas.hitTestAnnotation(at: CGPoint(x: 80, y: 195), tolerance: 2.0))
+        canvas.selectAnnotations(in: CGRect(x: 175, y: 190, width: 15, height: 15))
+        XCTAssertEqual(canvas.selectedIDs, [hugeWingArrow.id])
+        canvas.selectAnnotations(in: CGRect(x: 70, y: 190, width: 20, height: 20))
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
+
+        canvas.annotations = [hugeWedgeLine]
+        XCTAssertEqual(canvas.hitTestAnnotation(at: CGPoint(x: 245, y: 210), tolerance: 2.0), hugeWedgeLine.id)
+        XCTAssertNil(canvas.hitTestAnnotation(at: CGPoint(x: 75, y: 210), tolerance: 2.0))
+        canvas.selectAnnotations(in: CGRect(x: 240, y: 205, width: 12, height: 15))
+        XCTAssertEqual(canvas.selectedIDs, [hugeWedgeLine.id])
+        canvas.selectAnnotations(in: CGRect(x: 70, y: 205, width: 15, height: 15))
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
+    }
+
+    func testHeadWidthHandleScalesTaperedPolygonsPinchMagnifyAndStrokeWeightInvariants() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let target = (window: window, view: view)
+
+        let baseArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 60, y: 150), CGPoint(x: 240, y: 150)],
+            startPoint: CGPoint(x: 60, y: 150),
+            endPoint: CGPoint(x: 240, y: 150),
+            strokeColor: .red,
+            lineWeight: 6.0
+        )
+        let classicVerts = baseArrow.arrowPolygonPoints()
+        XCTAssertEqual(classicVerts.count, 7)
+        XCTAssertEqual(abs(classicVerts[0].y - 150.0), 3.0, accuracy: 1e-6)
+        XCTAssertEqual(abs(classicVerts[1].y - 150.0), 3.0, accuracy: 1e-6)
+
+        canvas.annotations = [baseArrow]
+        canvas.selectedIDs = [baseArrow.id]
+        let initialHeadGrip = baseArrow.headScaleHandleCenter
+        let undoBeforeHeadScale = canvas.undoStack.count
+        performMouseDrag(
+            StrokeDragSpec(
+                start: initialHeadGrip,
+                end: CGPoint(x: initialHeadGrip.x, y: 195),
+                midpoints: [CGPoint(x: initialHeadGrip.x, y: 175)]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeHeadScale + 1)
+        XCTAssertEqual(canvas.annotations[0].startPoint, baseArrow.startPoint)
+        XCTAssertEqual(canvas.annotations[0].endPoint, baseArrow.endPoint)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 90.0, accuracy: 1e-4)
+
+        let taperedVerts = canvas.annotations[0].arrowPolygonPoints()
+        XCTAssertEqual(taperedVerts.count, 7)
+        let tailHW = abs(Double(taperedVerts[0].y) - 150.0)
+        let neckHW = abs(Double(taperedVerts[1].y) - 150.0)
+        let headHW = abs(Double(taperedVerts[2].y) - 150.0)
+        XCTAssertLessThan(tailHW, neckHW)
+        XCTAssertLessThan(neckHW, headHW)
+        XCTAssertLessThan(taperedVerts[2].x, taperedVerts[1].x)
+
+        performMouseDrag(
+            StrokeDragSpec(
+                start: canvas.annotations[0].headScaleHandleCenter,
+                end: CGPoint(x: 180, y: 380)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 240.0, accuracy: 1e-6)
+
+        performMouseDrag(
+            StrokeDragSpec(
+                start: canvas.annotations[0].headScaleHandleCenter,
+                end: CGPoint(x: 180, y: 150)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 8.0, accuracy: 1e-6)
+        let minVerts = canvas.annotations[0].arrowPolygonPoints()
+        let minTailHW = abs(Double(minVerts[0].y) - 150.0)
+        let minNeckHW = abs(Double(minVerts[1].y) - 150.0)
+        let minHeadHW = abs(Double(minVerts[2].y) - 150.0)
+        XCTAssertLessThan(minTailHW, minNeckHW)
+        XCTAssertLessThan(minNeckHW, minHeadHW)
+
+        let straightLine = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 60, y: 150), CGPoint(x: 240, y: 150)],
+            startPoint: CGPoint(x: 60, y: 150),
+            endPoint: CGPoint(x: 240, y: 150),
+            isConstrained: true,
+            strokeColor: .blue,
+            lineWeight: 6.0
+        )
+        XCTAssertFalse(straightLine.usesTaperedWedgeLine)
+        canvas.annotations = [straightLine]
+        canvas.selectedIDs = [straightLine.id]
+        let lineGrip = straightLine.headScaleHandleCenter
+        performMouseDrag(
+            StrokeDragSpec(
+                start: lineGrip,
+                end: CGPoint(x: lineGrip.x, y: 190)
+            ),
+            on: target
+        )
+        XCTAssertTrue(canvas.annotations[0].usesTaperedWedgeLine)
+        XCTAssertTrue(canvas.annotations[0].isConstrained)
+        XCTAssertEqual(canvas.annotations[0].points.count, 2)
+        let wedgeVerts = canvas.annotations[0].taperedLinePolygonPoints()
+        XCTAssertEqual(wedgeVerts.count, 4)
+        let wedgeTailHW = abs(Double(wedgeVerts[0].y) - 150.0)
+        let wedgeHeadHW = abs(Double(wedgeVerts[1].y) - 150.0)
+        XCTAssertLessThan(wedgeTailHW, wedgeHeadHW)
+
+        let pinchArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 80, y: 120), CGPoint(x: 200, y: 120)],
+            startPoint: CGPoint(x: 80, y: 120),
+            endPoint: CGPoint(x: 200, y: 120),
+            strokeColor: .red,
+            lineWeight: 6.0,
+            headWidth: 60.0
+        )
+        let pinchLine = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 80, y: 190), CGPoint(x: 200, y: 190)],
+            startPoint: CGPoint(x: 80, y: 190),
+            endPoint: CGPoint(x: 200, y: 190),
+            isConstrained: true,
+            strokeColor: .green,
+            lineWeight: 6.0,
+            headWidth: 40.0
+        )
+        canvas.annotations = [pinchArrow, pinchLine]
+        canvas.selectedIDs = [pinchArrow.id, pinchLine.id]
+        let undoBeforePinch = canvas.undoStack.count
+
+        let pinchBegan = SyntheticTrackpadEvent()
+        pinchBegan.stubPhase = .began
+        pinchBegan.stubMagnification = 0.5
+        view.magnify(with: pinchBegan)
+
+        let pinchEnded = SyntheticTrackpadEvent()
+        pinchEnded.stubPhase = .ended
+        pinchEnded.stubMagnification = 0.0
+        view.magnify(with: pinchEnded)
+
+        XCTAssertEqual(canvas.undoStack.count, undoBeforePinch + 1)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 90.0, accuracy: 1e-4)
+        XCTAssertEqual(canvas.annotations[1].headWidth ?? 0.0, 60.0, accuracy: 1e-4)
+        XCTAssertTrue(canvas.annotations[1].isConstrained)
+        XCTAssertEqual(canvas.annotations[1].points.count, 2)
+
+        canvas.scaleSelectedAnnotations(by: 10.0)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 240.0, accuracy: 1e-6)
+        canvas.scaleSelectedAnnotations(by: 0.02)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 8.0, accuracy: 1e-6)
+
+        let weightArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 60, y: 140), CGPoint(x: 220, y: 140)],
+            startPoint: CGPoint(x: 60, y: 140),
+            endPoint: CGPoint(x: 220, y: 140),
+            strokeColor: .red,
+            lineWeight: 6.0,
+            headWidth: 12.0
+        )
+        canvas.annotations = [weightArrow]
+        canvas.selectedIDs = [weightArrow.id]
+        _ = canvas.adjustSelectedStrokeLineWeight(by: 10.0)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 16.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 22.4, accuracy: 1e-6)
+
+        canvas.updateSelectedStrokeLineWeight(30.0)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 30.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0, accuracy: 1e-6)
+
+        _ = canvas.adjustSelectedStrokeLineWeight(by: -10.0)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 20.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0, accuracy: 1e-6)
+    }
+
+    func testArrowTailFadeSettingToolbarToggleDraftInheritanceRenderingAndCodableMigration() throws {
+        let firstSettings = AppSettings(defaults: testDefaults)
+        XCTAssertFalse(firstSettings.annotateArrowTailFade)
+        firstSettings.annotateArrowTailFade = true
+
+        let reloadedSettings = AppSettings(defaults: testDefaults)
+        XCTAssertTrue(reloadedSettings.annotateArrowTailFade)
+        reloadedSettings.restoreDefaults()
+        XCTAssertFalse(reloadedSettings.annotateArrowTailFade)
+        XCTAssertFalse(AppSettings(defaults: testDefaults).annotateArrowTailFade)
+
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        settings.isWhiteboardActive = false
+        settings.dimScreenOnAnnotate = false
+        settings.annotateToolIndicator = false
+        let controls = AnnotateControlsView(settings: settings, canvasState: canvas)
+        let target = (window: window, view: view)
+
+        for directionalMode in [DrawMode.arrow, .freeHand, .highlighter] {
+            settings.currentDrawMode = directionalMode
+            XCTAssertTrue(controls.showsTailFadeToggle)
+        }
+        for otherMode in [DrawMode.rectangle, .circle, .text, .blur] {
+            settings.currentDrawMode = otherMode
+            XCTAssertFalse(controls.showsTailFadeToggle)
+        }
+
+        let arrowItem = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 40, y: 120), CGPoint(x: 200, y: 120)],
+            startPoint: CGPoint(x: 40, y: 120),
+            endPoint: CGPoint(x: 200, y: 120),
+            strokeColor: .red,
+            lineWeight: 8.0
+        )
+        let rectItem = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 40, y: 180),
+            endPoint: CGPoint(x: 140, y: 230),
+            strokeColor: .blue,
+            lineWeight: 4.0
+        )
+        canvas.annotations = [arrowItem, rectItem]
+        settings.currentDrawMode = .arrow
+        canvas.selectedIDs = [rectItem.id]
+        XCTAssertFalse(controls.showsTailFadeToggle)
+
+        canvas.selectedIDs = [arrowItem.id, rectItem.id]
+        XCTAssertTrue(controls.showsTailFadeToggle)
+        XCTAssertFalse(controls.isTailFadeToggleActive)
+
+        let undoBeforeToggle = canvas.undoStack.count
+        controls.toggleArrowTailFade()
+        XCTAssertTrue(settings.annotateArrowTailFade)
+        XCTAssertTrue(controls.isTailFadeToggleActive)
+        XCTAssertTrue(canvas.annotations[0].tailFadeEnabled)
+        XCTAssertFalse(canvas.annotations[1].tailFadeEnabled)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeToggle + 1)
+
+        canvas.undo()
+        XCTAssertFalse(canvas.annotations[0].tailFadeEnabled)
+        canvas.redo()
+        XCTAssertTrue(canvas.annotations[0].tailFadeEnabled)
+
+        canvas.selectedIDs = [arrowItem.id]
+        canvas.activeInlineEditingID = arrowItem.id
+        canvas.applySelectedTailFade(.disabled)
+        XCTAssertTrue(canvas.annotations[0].tailFadeEnabled)
+        canvas.activeInlineEditingID = nil
+        controls.toggleArrowTailFade()
+        XCTAssertFalse(settings.annotateArrowTailFade)
+        XCTAssertFalse(canvas.annotations[0].tailFadeEnabled)
+
+        canvas.annotations.removeAll()
+        canvas.selectedIDs.removeAll()
+        settings.annotateArrowTailFade = true
+
+        settings.currentDrawMode = .arrow
+        performMouseDrag(
+            StrokeDragSpec(start: CGPoint(x: 40, y: 80), end: CGPoint(x: 180, y: 80)),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 1)
+        XCTAssertTrue(canvas.annotations[0].tailFadeEnabled)
+
+        settings.currentDrawMode = .freeHand
+        performMouseDrag(
+            StrokeDragSpec(
+                start: CGPoint(x: 40, y: 120),
+                end: CGPoint(x: 180, y: 120),
+                modifiers: [.shift]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 2)
+        XCTAssertTrue(canvas.annotations[1].isConstrainedStraightLine)
+        XCTAssertTrue(canvas.annotations[1].tailFadeEnabled)
+        XCTAssertTrue(canvas.annotations[1].usesTaperedWedgeLine)
+
+        performMouseDrag(
+            StrokeDragSpec(
+                start: CGPoint(x: 40, y: 160),
+                end: CGPoint(x: 180, y: 170),
+                midpoints: [
+                    CGPoint(x: 90, y: 205),
+                    CGPoint(x: 135, y: 145)
+                ]
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 3)
+        XCTAssertFalse(canvas.annotations[2].usesDirectionalHandles)
+        XCTAssertFalse(canvas.annotations[2].tailFadeEnabled)
+        XCTAssertNil(canvas.annotations[2].headWidth)
+
+        settings.currentDrawMode = .rectangle
+        performMouseDrag(
+            StrokeDragSpec(start: CGPoint(x: 40, y: 210), end: CGPoint(x: 140, y: 250)),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 4)
+        XCTAssertFalse(canvas.annotations[3].tailFadeEnabled)
+
+        let fadedRedArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 40, y: 150), CGPoint(x: 260, y: 150)],
+            startPoint: CGPoint(x: 40, y: 150),
+            endPoint: CGPoint(x: 260, y: 150),
+            strokeColor: .red,
+            lineWeight: 12.0,
+            headWidth: 56.0,
+            tailFadeEnabled: true
+        )
+        canvas.annotations = [fadedRedArrow]
+        canvas.selectedIDs.removeAll()
+        guard let fadedRaster = rasterizeCanvasView(view),
+              let nearTailRGBA = fadedRaster.pixelRGBA(at: CGPoint(x: 46, y: 150)),
+              let nearHeadRGBA = fadedRaster.pixelRGBA(at: CGPoint(x: 235, y: 150)) else {
+            XCTFail("Expected rasterized tail-faded arrow")
+            return
+        }
+        XCTAssertGreaterThanOrEqual(nearHeadRGBA.a, 210)
+        XCTAssertLessThanOrEqual(nearTailRGBA.a, 45)
+        XCTAssertGreaterThan(Int(nearHeadRGBA.a), Int(nearTailRGBA.a) + 150)
+
+        var foundWhiteRimOnHead = false
+        for dy in -30...30 {
+            for dx in 230...259 {
+                guard let px = fadedRaster.pixelRGBA(at: CGPoint(x: dx, y: 150 + dy)) else { continue }
+                let hasWhiteRimChannels = px.g >= 90 && px.b >= 90
+                if hasWhiteRimChannels && px.a >= 120 {
+                    foundWhiteRimOnHead = true
+                }
+            }
+        }
+        XCTAssertTrue(foundWhiteRimOnHead)
+
+        let gradientFadedArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 40, y: 80), CGPoint(x: 250, y: 80)],
+            startPoint: CGPoint(x: 40, y: 80),
+            endPoint: CGPoint(x: 250, y: 80),
+            strokeColor: .blue,
+            gradientPair: GradientPair(startColor: .blue, endColor: .green),
+            lineWeight: 10.0,
+            headWidth: 48.0,
+            tailFadeEnabled: true
+        )
+        let highlighterFadedArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 40, y: 160), CGPoint(x: 250, y: 160)],
+            startPoint: CGPoint(x: 40, y: 160),
+            endPoint: CGPoint(x: 250, y: 160),
+            strokeColor: PresentifyCore.RGBColor.yellow.withAlpha(0.42),
+            lineWeight: 12.0,
+            isHighlighter: true,
+            headWidth: 48.0,
+            tailFadeEnabled: true
+        )
+        let fadedWedgeLine = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 40, y: 230), CGPoint(x: 250, y: 230)],
+            startPoint: CGPoint(x: 40, y: 230),
+            endPoint: CGPoint(x: 250, y: 230),
+            isConstrained: true,
+            strokeColor: .blue,
+            lineWeight: 10.0,
+            headWidth: 44.0,
+            tailFadeEnabled: true
+        )
+        canvas.annotations = [gradientFadedArrow, highlighterFadedArrow, fadedWedgeLine]
+        guard let comboRaster = rasterizeCanvasView(view),
+              let gradTail = comboRaster.pixelRGBA(at: CGPoint(x: 46, y: 80)),
+              let gradHead = comboRaster.pixelRGBA(at: CGPoint(x: 230, y: 80)),
+              let hlTail = comboRaster.pixelRGBA(at: CGPoint(x: 46, y: 160)),
+              let hlHead = comboRaster.pixelRGBA(at: CGPoint(x: 230, y: 160)),
+              let wedgeTail = comboRaster.pixelRGBA(at: CGPoint(x: 46, y: 230)),
+              let wedgeHead = comboRaster.pixelRGBA(at: CGPoint(x: 242, y: 230)) else {
+            XCTFail("Expected rasterized gradient, highlighter, and wedge tail-faded items")
+            return
+        }
+        XCTAssertGreaterThan(Int(gradHead.a), Int(gradTail.a) + 140)
+        XCTAssertGreaterThan(Int(hlHead.a), Int(hlTail.a) + 40)
+        XCTAssertLessThan(hlHead.a, 180)
+        XCTAssertGreaterThan(Int(wedgeHead.a), Int(wedgeTail.a) + 140)
+
+        XCTAssertEqual(AnnotationItem.sanitizeHeadWidth(.nan), 28.0, accuracy: 1e-6)
+        XCTAssertEqual(AnnotationItem.sanitizeHeadWidth(.infinity), 28.0, accuracy: 1e-6)
+        XCTAssertEqual(AnnotationItem.sanitizeHeadWidth(2.0), 8.0, accuracy: 1e-6)
+        XCTAssertEqual(AnnotationItem.sanitizeHeadWidth(999.0), 240.0, accuracy: 1e-6)
+
+        let baselineEncoded = try JSONEncoder().encode(arrowItem)
+        var legacyDict = try XCTUnwrap(JSONSerialization.jsonObject(with: baselineEncoded) as? [String: Any])
+        legacyDict.removeValue(forKey: "headWidth")
+        legacyDict.removeValue(forKey: "tailFadeEnabled")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyDict)
+        let decodedLegacy = try JSONDecoder().decode(AnnotationItem.self, from: legacyData)
+        XCTAssertNil(decodedLegacy.headWidth)
+        XCTAssertFalse(decodedLegacy.tailFadeEnabled)
+
+        var overWideArrowDict = legacyDict
+        overWideArrowDict["id"] = UUID().uuidString
+        overWideArrowDict["headWidth"] = 5000.0
+        overWideArrowDict["tailFadeEnabled"] = true
+
+        var underWideArrowDict = legacyDict
+        underWideArrowDict["id"] = UUID().uuidString
+        underWideArrowDict["headWidth"] = -15.0
+        underWideArrowDict["tailFadeEnabled"] = false
+
+        let rectEncoded = try JSONEncoder().encode(rectItem)
+        var dirtyRectDict = try XCTUnwrap(JSONSerialization.jsonObject(with: rectEncoded) as? [String: Any])
+        dirtyRectDict["headWidth"] = 120.0
+        dirtyRectDict["tailFadeEnabled"] = true
+
+        let sessionArrayData = try JSONSerialization.data(
+            withJSONObject: [overWideArrowDict, underWideArrowDict, dirtyRectDict]
+        )
+        let importedCanvas = AnnotationCanvasState()
+        XCTAssertTrue(importedCanvas.importSessionData(sessionArrayData))
+        XCTAssertEqual(importedCanvas.annotations.count, 3)
+        XCTAssertEqual(importedCanvas.annotations[0].headWidth ?? 0.0, 240.0, accuracy: 1e-6)
+        XCTAssertTrue(importedCanvas.annotations[0].tailFadeEnabled)
+        XCTAssertEqual(importedCanvas.annotations[1].headWidth ?? 0.0, 8.0, accuracy: 1e-6)
+        XCTAssertFalse(importedCanvas.annotations[1].tailFadeEnabled)
+        XCTAssertNil(importedCanvas.annotations[2].headWidth)
+        XCTAssertFalse(importedCanvas.annotations[2].tailFadeEnabled)
+    }
+
+    func testDirectionalHandleDragClampsCoordinatesResistsNonFiniteInputsAndPreservesSessionImport() {
+        let canvas = AnnotationCanvasState()
+        let arrowItem = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 100, y: 120), CGPoint(x: 240, y: 180)],
+            startPoint: CGPoint(x: 100, y: 120),
+            endPoint: CGPoint(x: 240, y: 180),
+            strokeColor: .red,
+            lineWeight: 6.0,
+            headWidth: 36.0,
+            tailFadeEnabled: true
+        )
+        let constrainedLine = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 80, y: 200), CGPoint(x: 220, y: 200)],
+            startPoint: CGPoint(x: 80, y: 200),
+            endPoint: CGPoint(x: 220, y: 200),
+            isConstrained: true,
+            strokeColor: .blue,
+            lineWeight: 5.0,
+            headWidth: 28.0,
+            tailFadeEnabled: true
+        )
+        let rectItem = AnnotationItem(
+            mode: .rectangle,
+            startPoint: CGPoint(x: 40, y: 40),
+            endPoint: CGPoint(x: 120, y: 90),
+            strokeColor: .green,
+            lineWeight: 4.0
+        )
+        canvas.annotations = [arrowItem, constrainedLine, rectItem]
+        let undoBeforeInvalid = canvas.undoStack.count
+
+        let badPoints: [CGPoint] = [
+            CGPoint(x: CGFloat.nan, y: 100),
+            CGPoint(x: 100, y: CGFloat.infinity),
+            CGPoint(x: -CGFloat.infinity, y: CGFloat.nan)
+        ]
+        for handle in [AnnotationDirectionalHandle.tail, .headWidth, .tip] {
+            for badPt in badPoints {
+                canvas.applyDirectionalHandleDrag(
+                    AnnotationDirectionalDragRequest(initialItem: arrowItem, handle: handle)
+                        .at(badPt, angleSnap: .free)
+                )
+                canvas.applyDirectionalHandleDrag(
+                    AnnotationDirectionalDragRequest(initialItem: constrainedLine, handle: handle)
+                        .at(badPt, angleSnap: .fortyFiveDegrees)
+                )
+            }
+            canvas.applyDirectionalHandleDrag(
+                AnnotationDirectionalDragRequest(initialItem: rectItem, handle: handle)
+                    .at(CGPoint(x: 200, y: 200), angleSnap: .free)
+            )
+        }
+
+        var corruptedInitial = arrowItem
+        corruptedInitial.startPoint = CGPoint(x: CGFloat.nan, y: 50)
+        canvas.applyDirectionalHandleDrag(
+            AnnotationDirectionalDragRequest(initialItem: corruptedInitial, handle: .tip)
+                .at(CGPoint(x: 300, y: 300), angleSnap: .free)
+        )
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeInvalid)
+
+        canvas.applyDirectionalHandleDrag(
+            AnnotationDirectionalDragRequest(initialItem: arrowItem, handle: .tip)
+                .at(CGPoint(x: 900_000, y: -900_000), angleSnap: .free)
+        )
+        canvas.applyDirectionalHandleDrag(
+            AnnotationDirectionalDragRequest(initialItem: canvas.annotations[0], handle: .tail)
+                .at(CGPoint(x: -900_000, y: 900_000), angleSnap: .fortyFiveDegrees)
+        )
+        canvas.applyDirectionalHandleDrag(
+            AnnotationDirectionalDragRequest(initialItem: canvas.annotations[0], handle: .headWidth)
+                .at(CGPoint(x: 900_000, y: 900_000), angleSnap: .free)
+        )
+        canvas.applyDirectionalHandleDrag(
+            AnnotationDirectionalDragRequest(initialItem: constrainedLine, handle: .tip)
+                .at(CGPoint(x: -750_000, y: -750_000), angleSnap: .fortyFiveDegrees)
+        )
+        canvas.applyDirectionalHandleDrag(
+            AnnotationDirectionalDragRequest(initialItem: canvas.annotations[1], handle: .headWidth)
+                .at(CGPoint(x: 500_000, y: -500_000), angleSnap: .free)
+        )
+
+        for item in canvas.annotations {
+            let finiteStart = item.startPoint.x.isFinite && item.startPoint.y.isFinite
+            let finiteEnd = item.endPoint.x.isFinite && item.endPoint.y.isFinite
+            XCTAssertTrue(finiteStart && finiteEnd)
+            XCTAssertLessThanOrEqual(abs(item.startPoint.x), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.startPoint.y), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.endPoint.x), 32_768.0)
+            XCTAssertLessThanOrEqual(abs(item.endPoint.y), 32_768.0)
+            for pt in item.points {
+                XCTAssertTrue(pt.x.isFinite && pt.y.isFinite)
+                XCTAssertLessThanOrEqual(abs(pt.x), 32_768.0)
+                XCTAssertLessThanOrEqual(abs(pt.y), 32_768.0)
+            }
+            for polyPt in item.arrowPolygonPoints() + item.taperedLinePolygonPoints() + item.directionalHandleCenters {
+                XCTAssertTrue(polyPt.x.isFinite && polyPt.y.isFinite)
+                XCTAssertLessThanOrEqual(abs(polyPt.x), 32_768.0)
+                XCTAssertLessThanOrEqual(abs(polyPt.y), 32_768.0)
+            }
+            if let hw = item.headWidth {
+                XCTAssertTrue(hw.isFinite)
+                XCTAssertGreaterThanOrEqual(hw, 8.0)
+                XCTAssertLessThanOrEqual(hw, 240.0)
+            }
+        }
+
+        guard let exported = canvas.exportSessionData() else {
+            XCTFail("Expected exported session data after extreme coordinate drags")
+            return
+        }
+        let restored = AnnotationCanvasState()
+        XCTAssertTrue(restored.importSessionData(exported))
+        XCTAssertEqual(restored.annotations.count, canvas.annotations.count)
+    }
+
+    func testOffCenterDirectionalHandleGrabNonFiniteHeadWidthWeightSyncAndBoundedTailFadeCulling() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        settings.isWhiteboardActive = false
+        settings.dimScreenOnAnnotate = false
+        settings.annotateToolIndicator = false
+
+        let grabArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 80, y: 150), CGPoint(x: 240, y: 150)],
+            startPoint: CGPoint(x: 80, y: 150),
+            endPoint: CGPoint(x: 240, y: 150),
+            strokeColor: .red,
+            lineWeight: 6.0,
+            headWidth: 40.0
+        )
+        canvas.annotations = [grabArrow]
+        canvas.selectedIDs = [grabArrow.id]
+
+        let tipCenter = canvas.annotations[0].tipHandleCenter
+        let tipGrab = CGPoint(x: tipCenter.x + 3.0, y: tipCenter.y + 4.0)
+        let tipFirstDrag = CGPoint(x: tipGrab.x + 1.0, y: tipGrab.y + 2.0)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: tipGrab), in: window))
+        XCTAssertEqual(canvas.annotations[0].endPoint, tipCenter)
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: tipFirstDrag), in: window))
+        XCTAssertEqual(canvas.annotations[0].startPoint, grabArrow.startPoint)
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, tipCenter.x + 1.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint.y, tipCenter.y + 2.0, accuracy: 1e-6)
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: tipFirstDrag), in: window))
+
+        canvas.annotations = [grabArrow]
+        canvas.selectedIDs = [grabArrow.id]
+        let headCenter = canvas.annotations[0].headScaleHandleCenter
+        let headGrab = CGPoint(x: headCenter.x, y: headCenter.y + 5.0)
+        let headFirstDrag = CGPoint(x: headGrab.x, y: headGrab.y + 1.0)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: headGrab), in: window))
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 40.0, accuracy: 1e-6)
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: headFirstDrag), in: window))
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0, accuracy: 1e-4)
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: headFirstDrag), in: window))
+
+        let tailCenter = canvas.annotations[0].tailHandleCenter
+        let tailGrab = CGPoint(x: tailCenter.x - 4.0, y: tailCenter.y - 3.0)
+        let tailFirstDrag = CGPoint(x: tailGrab.x - 2.0, y: tailGrab.y + 1.0)
+        view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: tailGrab), in: window))
+        view.mouseDragged(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDragged, location: tailFirstDrag), in: window))
+        XCTAssertEqual(canvas.annotations[0].startPoint.x, tailCenter.x - 2.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].startPoint.y, tailCenter.y + 1.0, accuracy: 1e-6)
+        view.mouseUp(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseUp, location: tailFirstDrag), in: window))
+
+        var mutatedArrow = grabArrow
+        mutatedArrow.lineWeight = 24.0
+        canvas.annotations = [mutatedArrow]
+        canvas.selectedIDs = [mutatedArrow.id]
+
+        canvas.annotations[0].headWidth = .nan
+        _ = canvas.adjustSelectedStrokeLineWeight(by: 6.0)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 30.0, accuracy: 1e-6)
+        XCTAssertTrue((canvas.annotations[0].headWidth ?? .nan).isFinite)
+        XCTAssertGreaterThanOrEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0, accuracy: 1e-6)
+
+        canvas.annotations[0].lineWeight = 24.0
+        canvas.annotations[0].headWidth = .infinity
+        _ = canvas.adjustSelectedStrokeLineWeight(by: 6.0)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 30.0, accuracy: 1e-6)
+        XCTAssertTrue((canvas.annotations[0].headWidth ?? .nan).isFinite)
+        XCTAssertGreaterThanOrEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0, accuracy: 1e-6)
+
+        canvas.annotations[0].lineWeight = 12.0
+        canvas.annotations[0].headWidth = .nan
+        canvas.updateSelectedStrokeLineWeight(30.0)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 30.0, accuracy: 1e-6)
+        XCTAssertTrue((canvas.annotations[0].headWidth ?? .nan).isFinite)
+        XCTAssertGreaterThanOrEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0, accuracy: 1e-6)
+
+        canvas.annotations[0].headWidth = .infinity
+        canvas.updateSelectedStrokeLineWeight(30.0)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 30.0, accuracy: 1e-6)
+        XCTAssertTrue((canvas.annotations[0].headWidth ?? .nan).isFinite)
+        XCTAssertGreaterThanOrEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0)
+        XCTAssertEqual(canvas.annotations[0].headWidth ?? 0.0, 42.0, accuracy: 1e-6)
+
+        let offScreenFadedArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 30_000, y: 30_000), CGPoint(x: 30_220, y: 30_060)],
+            startPoint: CGPoint(x: 30_000, y: 30_000),
+            endPoint: CGPoint(x: 30_220, y: 30_060),
+            strokeColor: .green,
+            lineWeight: 14.0,
+            headWidth: 64.0,
+            tailFadeEnabled: true
+        )
+        let offScreenSolidArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: -30_000, y: -30_000), CGPoint(x: -29_800, y: -29_950)],
+            startPoint: CGPoint(x: -30_000, y: -30_000),
+            endPoint: CGPoint(x: -29_800, y: -29_950),
+            strokeColor: .yellow,
+            lineWeight: 10.0,
+            headWidth: 48.0,
+            tailFadeEnabled: false
+        )
+        let offScreenFadedWedge = AnnotationItem(
+            mode: .freeHand,
+            points: [CGPoint(x: 30_000, y: 29_500), CGPoint(x: 30_250, y: 29_500)],
+            startPoint: CGPoint(x: 30_000, y: 29_500),
+            endPoint: CGPoint(x: 30_250, y: 29_500),
+            isConstrained: true,
+            strokeColor: .blue,
+            lineWeight: 10.0,
+            headWidth: 50.0,
+            tailFadeEnabled: true
+        )
+        let partialTailOffScreenArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: -80, y: 180), CGPoint(x: 180, y: 180)],
+            startPoint: CGPoint(x: -80, y: 180),
+            endPoint: CGPoint(x: 180, y: 180),
+            strokeColor: .red,
+            lineWeight: 12.0,
+            headWidth: 52.0,
+            tailFadeEnabled: true
+        )
+        let partialHeadOffScreenArrow = AnnotationItem(
+            mode: .arrow,
+            points: [CGPoint(x: 280, y: 260), CGPoint(x: 520, y: 260)],
+            startPoint: CGPoint(x: 280, y: 260),
+            endPoint: CGPoint(x: 520, y: 260),
+            strokeColor: .blue,
+            lineWeight: 12.0,
+            headWidth: 52.0,
+            tailFadeEnabled: true
+        )
+
+        canvas.annotations = [
+            offScreenFadedArrow,
+            offScreenSolidArrow,
+            offScreenFadedWedge,
+            partialTailOffScreenArrow,
+            partialHeadOffScreenArrow
+        ]
+        canvas.selectedIDs.removeAll()
+
+        guard let cachedRep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            XCTFail("Expected bitmapImageRepForCachingDisplay for canvas bounds")
+            return
+        }
+        view.cacheDisplay(in: view.bounds, to: cachedRep)
+        XCTAssertNotNil(cachedRep.cgImage)
+
+        guard let raster = rasterizeCanvasView(view),
+              let partialEntryRGBA = raster.pixelRGBA(at: CGPoint(x: 8, y: 180)),
+              let partialHeadRGBA = raster.pixelRGBA(at: CGPoint(x: 160, y: 180)),
+              let partialTailStartRGBA = raster.pixelRGBA(at: CGPoint(x: 290, y: 260)),
+              let partialRightEdgeRGBA = raster.pixelRGBA(at: CGPoint(x: 412, y: 260)),
+              let untouchedRGBA = raster.pixelRGBA(at: CGPoint(x: 200, y: 60)) else {
+            XCTFail("Expected rasterized pixels for off-screen and partially on-screen faded arrows")
+            return
+        }
+        XCTAssertGreaterThanOrEqual(partialHeadRGBA.a, 200)
+        XCTAssertGreaterThanOrEqual(partialHeadRGBA.r, 180)
+        XCTAssertGreaterThan(Int(partialHeadRGBA.a), Int(partialEntryRGBA.a) + 80)
+        XCTAssertGreaterThan(Int(partialRightEdgeRGBA.a), Int(partialTailStartRGBA.a) + 40)
+        XCTAssertEqual(untouchedRGBA.a, 0)
+    }
 }
+

@@ -353,6 +353,43 @@ public struct AnnotationCornerScaleRequest: Equatable, Sendable {
     }
 }
 
+public enum AnnotationDirectionalHandle: Equatable, Sendable {
+    case tail
+    case headWidth
+    case tip
+}
+
+public enum AnnotationAngleSnap: Equatable, Sendable {
+    case free
+    case fortyFiveDegrees
+}
+
+public struct AnnotationDirectionalDragRequest: Equatable, Sendable {
+    public var initialItem: AnnotationItem
+    public var handle: AnnotationDirectionalHandle
+    public var currentPoint: CGPoint
+    public var angleSnap: AnnotationAngleSnap
+
+    public init(initialItem: AnnotationItem, handle: AnnotationDirectionalHandle) {
+        self.initialItem = initialItem
+        self.handle = handle
+        self.currentPoint = initialItem.endPoint
+        self.angleSnap = .free
+    }
+
+    public func at(_ point: CGPoint, angleSnap: AnnotationAngleSnap = .free) -> AnnotationDirectionalDragRequest {
+        var copy = self
+        copy.currentPoint = point
+        copy.angleSnap = angleSnap
+        return copy
+    }
+}
+
+public enum AnnotationTailFadeMode: Equatable, Sendable {
+    case disabled
+    case enabled
+}
+
 public enum GradientGenerator {
     public static let presets: [GradientPair] = [
         GradientPair(startColor: RGBColor(red: 1.0, green: 0.25, blue: 0.42), endColor: RGBColor(red: 1.0, green: 0.58, blue: 0.0)),
@@ -438,6 +475,11 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         return min(max(raw, 8.0), 200.0)
     }
 
+    public static func sanitizeHeadWidth(_ raw: Double) -> Double {
+        guard raw.isFinite else { return 28.0 }
+        return min(max(raw, 8.0), 240.0)
+    }
+
     public var id: UUID
     public var mode: DrawMode
     public var points: [CGPoint]
@@ -458,6 +500,8 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
     public var blurOpacity: Double? = nil
     public var blurTintColor: RGBColor? = nil
     public var rotationRadians: Double = 0.0
+    public var headWidth: Double? = nil
+    public var tailFadeEnabled: Bool = false
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -480,6 +524,8 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         case blurOpacity
         case blurTintColor
         case rotationRadians
+        case headWidth
+        case tailFadeEnabled
     }
 
     public init(
@@ -502,7 +548,9 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         blurStyle: BlurStyle? = nil,
         blurOpacity: Double? = nil,
         blurTintColor: RGBColor? = nil,
-        rotationRadians: Double = 0.0
+        rotationRadians: Double = 0.0,
+        headWidth: Double? = nil,
+        tailFadeEnabled: Bool = false
     ) {
         self.id = id
         self.mode = mode
@@ -524,6 +572,8 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         self.blurOpacity = blurOpacity
         self.blurTintColor = blurTintColor
         self.rotationRadians = AnnotationCanvasState.sanitizeRotationRadians(rotationRadians)
+        self.headWidth = headWidth.map(Self.sanitizeHeadWidth)
+        self.tailFadeEnabled = tailFadeEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -548,6 +598,9 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         self.blurOpacity = try container.decodeIfPresent(Double.self, forKey: .blurOpacity)
         self.blurTintColor = try container.decodeIfPresent(RGBColor.self, forKey: .blurTintColor)
         self.rotationRadians = try container.decodeIfPresent(Double.self, forKey: .rotationRadians) ?? 0.0
+        let decodedHeadWidth = try container.decodeIfPresent(Double.self, forKey: .headWidth)
+        self.headWidth = decodedHeadWidth.map(Self.sanitizeHeadWidth)
+        self.tailFadeEnabled = try container.decodeIfPresent(Bool.self, forKey: .tailFadeEnabled) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -572,6 +625,8 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
         try container.encodeIfPresent(blurOpacity, forKey: .blurOpacity)
         try container.encodeIfPresent(blurTintColor, forKey: .blurTintColor)
         try container.encode(rotationRadians, forKey: .rotationRadians)
+        try container.encodeIfPresent(headWidth.map(Self.sanitizeHeadWidth), forKey: .headWidth)
+        try container.encode(tailFadeEnabled, forKey: .tailFadeEnabled)
     }
 
     public var effectiveBlurStyle: BlurStyle {
@@ -659,6 +714,79 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
             CGPoint(x: box.maxX, y: box.maxY),
             CGPoint(x: box.minX, y: box.maxY)
         ]
+    }
+
+    public var isConstrainedStraightLine: Bool {
+        let isFreeformMode = mode == .freeHand || mode == .highlighter
+        let isTwoPointConstrained = isConstrained && points.count == 2
+        return isFreeformMode && isTwoPointConstrained
+    }
+
+    public var usesDirectionalHandles: Bool {
+        mode == .arrow || isConstrainedStraightLine
+    }
+
+    public var usesTaperedWedgeLine: Bool {
+        let hasTaperStyling = headWidth != nil || tailFadeEnabled
+        return isConstrainedStraightLine && hasTaperStyling
+    }
+
+    public var tailHandleCenter: CGPoint {
+        AnnotationCanvasState.clampCanvasPoint(startPoint)
+    }
+
+    public var tipHandleCenter: CGPoint {
+        AnnotationCanvasState.clampCanvasPoint(endPoint)
+    }
+
+    public var headScaleAxisAnchor: CGPoint {
+        guard let basis = directionalBasis() else { return tipHandleCenter }
+        if mode == .arrow {
+            let geom = arrowGeometry(using: basis)
+            return AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: geom.wingCenterX, y: geom.wingCenterY)
+            )
+        }
+        let collarDist = basis.length * 0.82
+        return AnnotationCanvasState.clampCanvasPoint(
+            CGPoint(
+                x: basis.startX + basis.ux * collarDist,
+                y: basis.startY + basis.uy * collarDist
+            )
+        )
+    }
+
+    public var headScaleHandleCenter: CGPoint {
+        guard let basis = directionalBasis() else { return tipHandleCenter }
+        if mode == .arrow {
+            let geom = arrowGeometry(using: basis)
+            return AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(
+                    x: geom.wingCenterX + basis.px * geom.headHalfWidth,
+                    y: geom.wingCenterY + basis.py * geom.headHalfWidth
+                )
+            )
+        }
+        let resolvedHeadWidth = headWidth.map(Self.sanitizeHeadWidth) ?? min(max(basis.safeWeight, 8.0), 240.0)
+        let headHalfWidth = resolvedHeadWidth * 0.5
+        let hasTaperStyling = headWidth != nil || tailFadeEnabled
+        let tailHalfWidth = hasTaperStyling
+            ? max(1.5, min(basis.safeWeight * 0.45, headHalfWidth * 0.22))
+            : (basis.safeWeight * 0.5)
+        let collarDist = basis.length * 0.82
+        let collarX = basis.startX + basis.ux * collarDist
+        let collarY = basis.startY + basis.uy * collarDist
+        let offset = max(headHalfWidth * 0.82 + tailHalfWidth * 0.18, 14.0)
+        return AnnotationCanvasState.clampCanvasPoint(
+            CGPoint(
+                x: collarX + basis.px * offset,
+                y: collarY + basis.py * offset
+            )
+        )
+    }
+
+    public var directionalHandleCenters: [CGPoint] {
+        [tailHandleCenter, headScaleHandleCenter, tipHandleCenter]
     }
 
     public func toTextLocalSpace(_ point: CGPoint) -> CGPoint {
@@ -762,6 +890,9 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
             guard let minY = ys.min(), let maxY = ys.max() else { return layoutRect }
             return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
         case .arrow:
+            if let polyBox = Self.finitePolygonBounds(arrowPolygonPoints()) {
+                return polyBox
+            }
             let cePoints = [
                 CEPoint(x: Double(startPoint.x), y: Double(startPoint.y)),
                 CEPoint(x: Double(endPoint.x), y: Double(endPoint.y))
@@ -771,6 +902,9 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
             }
             return CGRect(x: box.x, y: box.y, width: box.width, height: box.height)
         case .freeHand, .highlighter:
+            if usesTaperedWedgeLine, let polyBox = Self.finitePolygonBounds(taperedLinePolygonPoints()) {
+                return polyBox
+            }
             let cePoints = points.map { CEPoint(x: Double($0.x), y: Double($0.y)) }
             let box = cePoints.withUnsafeBufferPointer { ptr in
                 ce_compute_bounding_box(ptr.baseAddress, ptr.count, lineWeight)
@@ -780,17 +914,168 @@ public struct AnnotationItem: Identifiable, Codable, Equatable, Sendable {
     }
 
     public func arrowPolygonPoints() -> [CGPoint] {
-        var buffer = Array(repeating: CEPoint(x: 0, y: 0), count: 7)
-        let count = buffer.withUnsafeMutableBufferPointer { ptr in
-            ce_build_arrow_polygon(
-                CEPoint(x: Double(startPoint.x), y: Double(startPoint.y)),
-                CEPoint(x: Double(endPoint.x), y: Double(endPoint.y)),
-                lineWeight,
-                ptr.baseAddress,
-                7
+        guard let basis = directionalBasis() else { return [] }
+        let geom = arrowGeometry(using: basis)
+        return [
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: basis.startX + basis.px * geom.tailHalfWidth, y: basis.startY + basis.py * geom.tailHalfWidth)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: geom.neckX + basis.px * geom.neckHalfWidth, y: geom.neckY + basis.py * geom.neckHalfWidth)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: geom.wingCenterX + basis.px * geom.headHalfWidth, y: geom.wingCenterY + basis.py * geom.headHalfWidth)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: basis.endX, y: basis.endY)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: geom.wingCenterX - basis.px * geom.headHalfWidth, y: geom.wingCenterY - basis.py * geom.headHalfWidth)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: geom.neckX - basis.px * geom.neckHalfWidth, y: geom.neckY - basis.py * geom.neckHalfWidth)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: basis.startX - basis.px * geom.tailHalfWidth, y: basis.startY - basis.py * geom.tailHalfWidth)
             )
+        ]
+    }
+
+    public func taperedLinePolygonPoints() -> [CGPoint] {
+        guard let basis = directionalBasis() else { return [] }
+        let resolvedHeadWidth = headWidth.map(Self.sanitizeHeadWidth) ?? min(max(basis.safeWeight, 8.0), 240.0)
+        let headHalfWidth = resolvedHeadWidth * 0.5
+        let hasTaperStyling = headWidth != nil || tailFadeEnabled
+        let tailHalfWidth = hasTaperStyling
+            ? max(1.5, min(basis.safeWeight * 0.45, headHalfWidth * 0.22))
+            : (basis.safeWeight * 0.5)
+        return [
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: basis.startX + basis.px * tailHalfWidth, y: basis.startY + basis.py * tailHalfWidth)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: basis.endX + basis.px * headHalfWidth, y: basis.endY + basis.py * headHalfWidth)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: basis.endX - basis.px * headHalfWidth, y: basis.endY - basis.py * headHalfWidth)
+            ),
+            AnnotationCanvasState.clampCanvasPoint(
+                CGPoint(x: basis.startX - basis.px * tailHalfWidth, y: basis.startY - basis.py * tailHalfWidth)
+            )
+        ]
+    }
+
+    private struct DirectionalBasis {
+        let startX: Double
+        let startY: Double
+        let endX: Double
+        let endY: Double
+        let length: Double
+        let ux: Double
+        let uy: Double
+        let px: Double
+        let py: Double
+        let safeWeight: Double
+    }
+
+    private struct ArrowGeometry {
+        let tailHalfWidth: Double
+        let neckHalfWidth: Double
+        let headHalfWidth: Double
+        let neckX: Double
+        let neckY: Double
+        let wingCenterX: Double
+        let wingCenterY: Double
+    }
+
+    private func directionalBasis() -> DirectionalBasis? {
+        let hasFiniteStart = startPoint.x.isFinite && startPoint.y.isFinite
+        let hasFiniteEnd = endPoint.x.isFinite && endPoint.y.isFinite
+        guard hasFiniteStart && hasFiniteEnd else { return nil }
+        let startX = Double(startPoint.x)
+        let startY = Double(startPoint.y)
+        let endX = Double(endPoint.x)
+        let endY = Double(endPoint.y)
+        let dx = endX - startX
+        let dy = endY - startY
+        guard dx.isFinite && dy.isFinite else { return nil }
+        let length = hypot(dx, dy)
+        let ux = length > 1e-6 ? (dx / length) : 1.0
+        let uy = length > 1e-6 ? (dy / length) : 0.0
+        let safeWeight = lineWeight.isFinite ? min(max(lineWeight, 1.0), 64.0) : 6.0
+        return DirectionalBasis(
+            startX: startX,
+            startY: startY,
+            endX: endX,
+            endY: endY,
+            length: length,
+            ux: ux,
+            uy: uy,
+            px: -uy,
+            py: ux,
+            safeWeight: safeWeight
+        )
+    }
+
+    private func arrowGeometry(using basis: DirectionalBasis) -> ArrowGeometry {
+        let hasTaperStyling = headWidth != nil || tailFadeEnabled
+        let headHalfWidth: Double
+        let headLength: Double
+        let tailHalfWidth: Double
+        let neckHalfWidth: Double
+        let barbBack: Double
+
+        if hasTaperStyling {
+            let resolvedHeadWidth = headWidth.map(Self.sanitizeHeadWidth) ?? min(max(basis.safeWeight * 3.8, 16.0), 240.0)
+            headHalfWidth = resolvedHeadWidth * 0.5
+            let desiredHeadLength = max(14.0, headHalfWidth * 1.65)
+            headLength = basis.length > 1e-6 ? min(basis.length * 0.60, desiredHeadLength) : desiredHeadLength
+            tailHalfWidth = max(1.5, min(basis.safeWeight * 0.42, headHalfWidth * 0.20))
+            neckHalfWidth = min(max(basis.safeWeight * 0.55, headHalfWidth * 0.44), headHalfWidth * 0.82)
+            barbBack = headLength * 0.14
+        } else {
+            headHalfWidth = max(basis.safeWeight * 1.8, 7.0)
+            let desiredHeadLength = max(basis.safeWeight * 3.0, 12.0)
+            headLength = basis.length > 1e-6 ? min(basis.length * 0.65, desiredHeadLength) : desiredHeadLength
+            tailHalfWidth = basis.safeWeight * 0.5
+            neckHalfWidth = basis.safeWeight * 0.5
+            barbBack = 0.0
         }
-        return buffer.prefix(count).map { CGPoint(x: $0.x, y: $0.y) }
+
+        let neckX = basis.endX - basis.ux * headLength
+        let neckY = basis.endY - basis.uy * headLength
+        let wingCenterX = neckX - basis.ux * barbBack
+        let wingCenterY = neckY - basis.uy * barbBack
+        return ArrowGeometry(
+            tailHalfWidth: tailHalfWidth,
+            neckHalfWidth: neckHalfWidth,
+            headHalfWidth: headHalfWidth,
+            neckX: neckX,
+            neckY: neckY,
+            wingCenterX: wingCenterX,
+            wingCenterY: wingCenterY
+        )
+    }
+
+    private static func finitePolygonBounds(_ vertices: [CGPoint]) -> CGRect? {
+        guard !vertices.isEmpty else { return nil }
+        var minX = Double.greatestFiniteMagnitude
+        var maxX = -Double.greatestFiniteMagnitude
+        var minY = Double.greatestFiniteMagnitude
+        var maxY = -Double.greatestFiniteMagnitude
+        for vertex in vertices {
+            let x = Double(vertex.x)
+            let y = Double(vertex.y)
+            guard x.isFinite && y.isFinite else { return nil }
+            minX = min(minX, x)
+            maxX = max(maxX, x)
+            minY = min(minY, y)
+            maxY = max(maxY, y)
+        }
+        let width = maxX - minX
+        let height = maxY - minY
+        guard width.isFinite && height.isFinite else { return nil }
+        return CGRect(x: minX, y: minY, width: width, height: height)
     }
 }
 
@@ -942,6 +1227,11 @@ public final class AnnotationCanvasState: ObservableObject {
             }
         }
 
+        if !draft.usesDirectionalHandles {
+            draft.tailFadeEnabled = false
+            draft.headWidth = nil
+        }
+
         recordUndoSnapshot()
         annotations.append(draft)
         return draft.id
@@ -1041,23 +1331,38 @@ public final class AnnotationCanvasState: ObservableObject {
                     return item.id
                 }
             case .arrow:
-                let segment = [
-                    CEPoint(x: Double(item.startPoint.x), y: Double(item.startPoint.y)),
-                    CEPoint(x: Double(item.endPoint.x), y: Double(item.endPoint.y))
-                ]
-                let isHit = segment.withUnsafeBufferPointer { ptr in
-                    ce_hit_test_stroke(ptr.baseAddress, ptr.count, item.lineWeight * 1.5, testPoint, tolerance)
+                let vertices = item.arrowPolygonPoints()
+                if Self.pointInPolygon(point, vertices: vertices) {
+                    return item.id
                 }
-                if isHit {
+                let closedEdges = Self.closedStrokePoints(vertices)
+                let isEdgeHit = closedEdges.withUnsafeBufferPointer { ptr in
+                    ce_hit_test_stroke(ptr.baseAddress, ptr.count, 0.0, testPoint, tolerance)
+                }
+                if isEdgeHit {
                     return item.id
                 }
             case .freeHand, .highlighter:
-                let strokePoints = item.points.map { CEPoint(x: Double($0.x), y: Double($0.y)) }
-                let isHit = strokePoints.withUnsafeBufferPointer { ptr in
-                    ce_hit_test_stroke(ptr.baseAddress, ptr.count, item.lineWeight, testPoint, tolerance)
-                }
-                if isHit {
-                    return item.id
+                if item.usesTaperedWedgeLine {
+                    let vertices = item.taperedLinePolygonPoints()
+                    if Self.pointInPolygon(point, vertices: vertices) {
+                        return item.id
+                    }
+                    let closedEdges = Self.closedStrokePoints(vertices)
+                    let isEdgeHit = closedEdges.withUnsafeBufferPointer { ptr in
+                        ce_hit_test_stroke(ptr.baseAddress, ptr.count, 0.0, testPoint, tolerance)
+                    }
+                    if isEdgeHit {
+                        return item.id
+                    }
+                } else {
+                    let strokePoints = item.points.map { CEPoint(x: Double($0.x), y: Double($0.y)) }
+                    let isHit = strokePoints.withUnsafeBufferPointer { ptr in
+                        ce_hit_test_stroke(ptr.baseAddress, ptr.count, item.lineWeight, testPoint, tolerance)
+                    }
+                    if isHit {
+                        return item.id
+                    }
                 }
             }
         }
@@ -1077,13 +1382,23 @@ public final class AnnotationCanvasState: ObservableObject {
         var matched: Set<UUID> = []
         for item in annotations {
             switch item.mode {
-            case .freeHand, .highlighter, .arrow:
-                let pts = item.points.map { CEPoint(x: Double($0.x), y: Double($0.y)) }
-                let intersects = pts.withUnsafeBufferPointer { ptr in
-                    ce_rect_intersects_stroke(ceMarquee, ptr.baseAddress, ptr.count)
-                }
-                if intersects {
+            case .arrow:
+                if Self.rectIntersectsPolygon(normalized, vertices: item.arrowPolygonPoints()) {
                     matched.insert(item.id)
+                }
+            case .freeHand, .highlighter:
+                if item.usesTaperedWedgeLine {
+                    if Self.rectIntersectsPolygon(normalized, vertices: item.taperedLinePolygonPoints()) {
+                        matched.insert(item.id)
+                    }
+                } else {
+                    let pts = item.points.map { CEPoint(x: Double($0.x), y: Double($0.y)) }
+                    let intersects = pts.withUnsafeBufferPointer { ptr in
+                        ce_rect_intersects_stroke(ceMarquee, ptr.baseAddress, ptr.count)
+                    }
+                    if intersects {
+                        matched.insert(item.id)
+                    }
                 }
             case .text:
                 if item.intersectsMarquee(normalized) {
@@ -1289,7 +1604,7 @@ public final class AnnotationCanvasState: ObservableObject {
             case .arrow, .freeHand, .highlighter:
                 guard let rawBounds = Self.rawPointBounds(for: item) else { continue }
                 let maxRawDim: Double
-                if item.mode == .arrow {
+                if item.usesDirectionalHandles {
                     maxRawDim = hypot(
                         Double(item.endPoint.x - item.startPoint.x),
                         Double(item.endPoint.y - item.startPoint.y)
@@ -1310,8 +1625,14 @@ public final class AnnotationCanvasState: ObservableObject {
                 updated.endPoint = scalePoint(item.endPoint)
                 if item.mode == .arrow {
                     updated.points = [updated.startPoint, updated.endPoint]
+                } else if item.isConstrainedStraightLine {
+                    updated.points = [updated.startPoint, updated.endPoint]
+                    updated.isConstrained = true
                 } else {
                     updated.points = item.points.map(scalePoint)
+                }
+                if item.usesDirectionalHandles, let customHead = item.headWidth {
+                    updated.headWidth = AnnotationItem.sanitizeHeadWidth(customHead * effectiveFactor)
                 }
             case .text:
                 break
@@ -1546,6 +1867,98 @@ public final class AnnotationCanvasState: ObservableObject {
         annotations[index] = updated
     }
 
+    public func applyDirectionalHandleDrag(_ request: AnnotationDirectionalDragRequest) {
+        let currentPt = request.currentPoint
+        let hasFiniteCurrent = currentPt.x.isFinite && currentPt.y.isFinite
+        guard hasFiniteCurrent else { return }
+
+        let initial = request.initialItem
+        guard initial.usesDirectionalHandles else { return }
+        guard Self.hasAllFinitePoints(initial) else { return }
+        guard let index = annotations.firstIndex(where: { $0.id == initial.id }) else { return }
+
+        let initStartX = Double(initial.startPoint.x)
+        let initStartY = Double(initial.startPoint.y)
+        let initEndX = Double(initial.endPoint.x)
+        let initEndY = Double(initial.endPoint.y)
+        let initDX = initEndX - initStartX
+        let initDY = initEndY - initStartY
+        guard initDX.isFinite && initDY.isFinite else { return }
+        let initLen = hypot(initDX, initDY)
+        let initUX = initLen > 1e-6 ? (initDX / initLen) : 1.0
+        let initUY = initLen > 1e-6 ? (initDY / initLen) : 0.0
+        let px = -initUY
+        let py = initUX
+
+        var updated = initial
+        switch request.handle {
+        case .tail, .tip:
+            let isTail = request.handle == .tail
+            let rawAnchor = isTail ? initial.endPoint : initial.startPoint
+            let safeAnchor = Self.clampCanvasPoint(rawAnchor)
+            let anchorX = Double(safeAnchor.x)
+            let anchorY = Double(safeAnchor.y)
+            var candidateX = Double(currentPt.x)
+            var candidateY = Double(currentPt.y)
+            if request.angleSnap == .fortyFiveDegrees {
+                let snapped = ce_constrain_line(
+                    CEPoint(x: anchorX, y: anchorY),
+                    CEPoint(x: candidateX, y: candidateY)
+                )
+                candidateX = snapped.x
+                candidateY = snapped.y
+            }
+            guard candidateX.isFinite && candidateY.isFinite else { return }
+            let diffX = candidateX - anchorX
+            let diffY = candidateY - anchorY
+            let dist = hypot(diffX, diffY)
+            guard dist.isFinite else { return }
+            let resolvedMoving: CGPoint
+            if dist < 8.0 {
+                let fallbackUX = isTail ? -initUX : initUX
+                let fallbackUY = isTail ? -initUY : initUY
+                resolvedMoving = Self.clampCanvasPoint(
+                    CGPoint(x: anchorX + fallbackUX * 8.0, y: anchorY + fallbackUY * 8.0)
+                )
+            } else {
+                resolvedMoving = Self.clampCanvasPoint(CGPoint(x: candidateX, y: candidateY))
+            }
+            if isTail {
+                updated.startPoint = resolvedMoving
+                updated.endPoint = safeAnchor
+            } else {
+                updated.startPoint = safeAnchor
+                updated.endPoint = resolvedMoving
+            }
+            updated.points = [updated.startPoint, updated.endPoint]
+            if initial.isConstrainedStraightLine {
+                updated.isConstrained = true
+            } else {
+                updated.isConstrained = request.angleSnap == .fortyFiveDegrees
+            }
+        case .headWidth:
+            let dx = Double(currentPt.x) - initStartX
+            let dy = Double(currentPt.y) - initStartY
+            guard dx.isFinite && dy.isFinite else { return }
+            let perpDist = abs(dx * px + dy * py)
+            guard perpDist.isFinite else { return }
+            let nextHeadWidth: Double
+            if initial.mode == .arrow {
+                nextHeadWidth = AnnotationItem.sanitizeHeadWidth(perpDist * 2.0)
+            } else {
+                let safeWeight = initial.lineWeight.isFinite ? min(max(initial.lineWeight, 1.0), 64.0) : 6.0
+                let approxTailHW = max(1.5, safeWeight * 0.45)
+                let rawHalfWidth = max(4.0, (perpDist - 0.18 * approxTailHW) / 0.82)
+                nextHeadWidth = AnnotationItem.sanitizeHeadWidth(rawHalfWidth * 2.0)
+            }
+            updated.headWidth = nextHeadWidth
+        }
+
+        guard updated != annotations[index] else { return }
+        recordTransformUndoSnapshotIfNeeded()
+        annotations[index] = updated
+    }
+
     @discardableResult
     public func adjustSelectedTextFontSize(by delta: Double) -> Double? {
         let isValidDelta = delta.isFinite && delta != 0
@@ -1605,7 +2018,13 @@ public final class AnnotationCanvasState: ObservableObject {
                 firstResultWeight = clamped
             }
             let weightChanged = !isCurrentFinite || abs(clamped - item.lineWeight) > 1e-6
-            if weightChanged {
+            var headChanged = false
+            if let customHead = item.headWidth {
+                let safeCustomHead = AnnotationItem.sanitizeHeadWidth(customHead)
+                let requiredHead = AnnotationItem.sanitizeHeadWidth(max(safeCustomHead, clamped * 1.4))
+                headChanged = !customHead.isFinite || abs(requiredHead - customHead) > 1e-6
+            }
+            if weightChanged || headChanged {
                 anyWillChange = true
             }
         }
@@ -1621,6 +2040,10 @@ public final class AnnotationCanvasState: ObservableObject {
             let rawSum = baseWeight + delta
             let nextWeight = rawSum.isFinite ? min(max(rawSum, 1.0), 64.0) : baseWeight
             annotations[index].lineWeight = nextWeight
+            if let customHead = annotations[index].headWidth {
+                let safeCustomHead = AnnotationItem.sanitizeHeadWidth(customHead)
+                annotations[index].headWidth = AnnotationItem.sanitizeHeadWidth(max(safeCustomHead, nextWeight * 1.4))
+            }
         }
         return reportedWeight
     }
@@ -1713,10 +2136,14 @@ public final class AnnotationCanvasState: ObservableObject {
         let willChange = annotations.contains { item in
             let isSelectedStroke = selectedIDs.contains(item.id) && item.mode.supportsStrokeLineWeight
             guard isSelectedStroke else { return false }
-            if !item.lineWeight.isFinite {
+            let weightDiffers = !item.lineWeight.isFinite || abs(item.lineWeight - clamped) > 1e-6
+            if weightDiffers {
                 return true
             }
-            return abs(item.lineWeight - clamped) > 1e-6
+            guard let customHead = item.headWidth else { return false }
+            let safeCustomHead = AnnotationItem.sanitizeHeadWidth(customHead)
+            let requiredHead = AnnotationItem.sanitizeHeadWidth(max(safeCustomHead, clamped * 1.4))
+            return !customHead.isFinite || abs(requiredHead - customHead) > 1e-6
         }
         guard willChange else { return }
         recordUndoSnapshot()
@@ -1724,6 +2151,30 @@ public final class AnnotationCanvasState: ObservableObject {
             let isSelectedStroke = selectedIDs.contains(annotations[index].id) && annotations[index].mode.supportsStrokeLineWeight
             if isSelectedStroke {
                 annotations[index].lineWeight = clamped
+                if let customHead = annotations[index].headWidth {
+                    let safeCustomHead = AnnotationItem.sanitizeHeadWidth(customHead)
+                    annotations[index].headWidth = AnnotationItem.sanitizeHeadWidth(max(safeCustomHead, clamped * 1.4))
+                }
+            }
+        }
+    }
+
+    public func applySelectedTailFade(_ mode: AnnotationTailFadeMode) {
+        guard !selectedIDs.isEmpty else { return }
+        let targetEnabled = mode == .enabled
+        let willChange = annotations.contains { item in
+            let isSelectedEditable = selectedIDs.contains(item.id) && item.id != activeInlineEditingID
+            let isTargetDirectional = isSelectedEditable && item.usesDirectionalHandles
+            return isTargetDirectional && item.tailFadeEnabled != targetEnabled
+        }
+        guard willChange else { return }
+        recordUndoSnapshot()
+        for index in annotations.indices {
+            let item = annotations[index]
+            let isSelectedEditable = selectedIDs.contains(item.id) && item.id != activeInlineEditingID
+            let isTargetDirectional = isSelectedEditable && item.usesDirectionalHandles
+            if isTargetDirectional {
+                annotations[index].tailFadeEnabled = targetEnabled
             }
         }
     }
@@ -1883,7 +2334,7 @@ public final class AnnotationCanvasState: ObservableObject {
         return normalized
     }
 
-    private static func clampCanvasCoordinate(_ value: Double) -> Double {
+    fileprivate static func clampCanvasCoordinate(_ value: Double) -> Double {
         if value.isFinite {
             return min(max(value, -32_768.0), 32_768.0)
         }
@@ -1896,11 +2347,78 @@ public final class AnnotationCanvasState: ObservableObject {
         return 0.0
     }
 
-    private static func clampCanvasPoint(_ point: CGPoint) -> CGPoint {
+    fileprivate static func clampCanvasPoint(_ point: CGPoint) -> CGPoint {
         CGPoint(
             x: clampCanvasCoordinate(Double(point.x)),
             y: clampCanvasCoordinate(Double(point.y))
         )
+    }
+
+    private static func closedStrokePoints(_ vertices: [CGPoint]) -> [CEPoint] {
+        guard let first = vertices.first else { return [] }
+        return (vertices + [first]).map { CEPoint(x: Double($0.x), y: Double($0.y)) }
+    }
+
+    private static func pointInPolygon(_ point: CGPoint, vertices: [CGPoint]) -> Bool {
+        guard vertices.count >= 3 else { return false }
+        let px = Double(point.x)
+        let py = Double(point.y)
+        guard px.isFinite && py.isFinite else { return false }
+        var inside = false
+        var j = vertices.count - 1
+        for i in 0..<vertices.count {
+            let xi = Double(vertices[i].x)
+            let yi = Double(vertices[i].y)
+            let xj = Double(vertices[j].x)
+            let yj = Double(vertices[j].y)
+            let hasFiniteEdge = xi.isFinite && yi.isFinite
+            let hasFinitePrev = xj.isFinite && yj.isFinite
+            guard hasFiniteEdge && hasFinitePrev else { return false }
+            let spansY = (yi > py) != (yj > py)
+            if spansY {
+                let intersectX = (xj - xi) * (py - yi) / (yj - yi) + xi
+                if px < intersectX {
+                    inside.toggle()
+                }
+            }
+            j = i
+        }
+        return inside
+    }
+
+    private static func rectIntersectsPolygon(_ normalized: CGRect, vertices: [CGPoint]) -> Bool {
+        guard !vertices.isEmpty else { return false }
+        let hasFiniteOrigin = normalized.origin.x.isFinite && normalized.origin.y.isFinite
+        let hasFiniteSize = normalized.size.width.isFinite && normalized.size.height.isFinite
+        guard hasFiniteOrigin && hasFiniteSize else { return false }
+        let containsVertex = vertices.contains { vertex in
+            let inXRange = vertex.x >= normalized.minX && vertex.x <= normalized.maxX
+            let inYRange = vertex.y >= normalized.minY && vertex.y <= normalized.maxY
+            return inXRange && inYRange
+        }
+        if containsVertex {
+            return true
+        }
+        let samplePoints = [
+            CGPoint(x: normalized.midX, y: normalized.midY),
+            CGPoint(x: normalized.minX, y: normalized.minY),
+            CGPoint(x: normalized.maxX, y: normalized.minY),
+            CGPoint(x: normalized.maxX, y: normalized.maxY),
+            CGPoint(x: normalized.minX, y: normalized.maxY)
+        ]
+        if samplePoints.contains(where: { pointInPolygon($0, vertices: vertices) }) {
+            return true
+        }
+        let ceMarquee = CERect(
+            x: Double(normalized.origin.x),
+            y: Double(normalized.origin.y),
+            width: Double(normalized.size.width),
+            height: Double(normalized.size.height)
+        )
+        let closedEdges = closedStrokePoints(vertices)
+        return closedEdges.withUnsafeBufferPointer { ptr in
+            ce_rect_intersects_stroke(ceMarquee, ptr.baseAddress, ptr.count)
+        }
     }
 
     private static func hasAllFinitePoints(_ item: AnnotationItem) -> Bool {
@@ -1965,6 +2483,14 @@ public final class AnnotationCanvasState: ObservableObject {
             item.lineWeight = item.lineWeight.isFinite ? min(max(item.lineWeight, 1.0), 64.0) : 6.0
             item.fontSize = AnnotationItem.sanitizeFontSize(item.fontSize)
             item.rotationRadians = Self.sanitizeRotationRadians(item.rotationRadians)
+            if item.usesDirectionalHandles {
+                if let rawHeadWidth = item.headWidth {
+                    item.headWidth = AnnotationItem.sanitizeHeadWidth(rawHeadWidth)
+                }
+            } else {
+                item.headWidth = nil
+                item.tailFadeEnabled = false
+            }
             if let rawOpacity = item.blurOpacity {
                 item.blurOpacity = rawOpacity.isFinite ? min(max(rawOpacity, 0.10), 1.00) : 0.55
             }

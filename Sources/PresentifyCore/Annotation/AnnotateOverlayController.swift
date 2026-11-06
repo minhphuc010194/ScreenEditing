@@ -220,6 +220,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         case textCornerScale(id: UUID, center: CGPoint, initialDistance: Double, initialFontSize: Double)
         case textRotate(id: UUID, center: CGPoint, initialAngle: Double, initialRotation: Double)
         case itemCornerScale(anchor: AnnotationCornerScaleAnchor, dragStartPoint: CGPoint)
+        case directionalHandle(initialItem: AnnotationItem, handle: AnnotationDirectionalHandle)
     }
 
     public let canvasState: AnnotationCanvasState
@@ -256,6 +257,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     private var editingInitialFontSize: Double?
     private var editingOverrideFontSize: Double?
     private var activeAnnotationTransform: ActiveAnnotationTransform?
+    private var directionalGrabOffset: CGPoint = .zero
     private var isApplyingPostDrawSelection = false
     private var isTrackpadGestureTransforming = false
     private var isDraggingSelection = false
@@ -395,6 +397,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
     public func cancelActiveInteraction() {
         activeAnnotationTransform = nil
+        directionalGrabOffset = .zero
         isTrackpadGestureTransforming = false
         isDraggingSelection = false
         isMarqueeSelecting = false
@@ -716,6 +719,30 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             return nil
         }
 
+        if item.usesDirectionalHandles {
+            let candidateHandles: [(AnnotationDirectionalHandle, CGPoint)] = [
+                (.headWidth, item.headScaleHandleCenter),
+                (.tip, item.tipHandleCenter),
+                (.tail, item.tailHandleCenter)
+            ]
+            var bestHandle: AnnotationDirectionalHandle?
+            var bestDistance = handleHitRadius
+            for (handle, center) in candidateHandles {
+                let hasFiniteCenter = center.x.isFinite && center.y.isFinite
+                guard hasFiniteCenter else { continue }
+                let dist = hypot(point.x - center.x, point.y - center.y)
+                let isCloserHit = bestHandle == nil ? (dist <= bestDistance) : (dist < bestDistance)
+                if isCloserHit {
+                    bestHandle = handle
+                    bestDistance = dist
+                }
+            }
+            if let bestHandle {
+                return .directionalHandle(initialItem: item, handle: bestHandle)
+            }
+            return nil
+        }
+
         guard let selectionBox = visibleNonTextSelectionBox(for: item) else { return nil }
         let corners = [
             CGPoint(x: selectionBox.minX, y: selectionBox.minY),
@@ -776,6 +803,18 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         if let transform = hitTestSelectedAnnotationTransformHandle(at: point) {
             isPostDrawAutoSelection = false
             activeAnnotationTransform = transform
+            dragOriginPoint = point
+            if case let .directionalHandle(initialItem, handle) = transform {
+                let handleCenter: CGPoint
+                switch handle {
+                case .tail: handleCenter = initialItem.tailHandleCenter
+                case .headWidth: handleCenter = initialItem.headScaleHandleCenter
+                case .tip: handleCenter = initialItem.tipHandleCenter
+                }
+                directionalGrabOffset = CGPoint(x: point.x - handleCenter.x, y: point.y - handleCenter.y)
+            } else {
+                directionalGrabOffset = .zero
+            }
             isDraggingSelection = false
             isMarqueeSelecting = false
             canvasState.beginInteractiveTransform()
@@ -838,6 +877,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             blurOpacity: settings.blurOpacity,
             blurTintColor: settings.activeBlurTintColor
         )
+        if settings.annotateArrowTailFade {
+            canvasState.activeDraft?.tailFadeEnabled = true
+        }
         syncBackdropBlurViews()
         needsDisplay = true
     }
@@ -877,6 +919,16 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                         .withConstraint(constraint)
                     canvasState.applyCornerScale(request)
                     syncBackdropBlurViews()
+                case let .directionalHandle(initialItem, handle):
+                    guard point != dragOriginPoint else { break }
+                    let adjustedPoint = CGPoint(
+                        x: point.x - directionalGrabOffset.x,
+                        y: point.y - directionalGrabOffset.y
+                    )
+                    let snap: AnnotationAngleSnap = flags.contains(.shift) ? .fortyFiveDegrees : .free
+                    let request = AnnotationDirectionalDragRequest(initialItem: initialItem, handle: handle)
+                        .at(adjustedPoint, angleSnap: snap)
+                    canvasState.applyDirectionalHandleDrag(request)
                 }
             }
             needsDisplay = true
@@ -922,6 +974,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 blurOpacity: settings.blurOpacity,
                 blurTintColor: settings.activeBlurTintColor
             )
+            if settings.annotateArrowTailFade {
+                canvasState.activeDraft?.tailFadeEnabled = true
+            }
         }
 
         canvasState.updateStroke(
@@ -939,6 +994,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
 
         if activeAnnotationTransform != nil {
             activeAnnotationTransform = nil
+            directionalGrabOffset = .zero
             canvasState.endInteractiveTransform()
             syncBackdropBlurViews()
             needsDisplay = true
@@ -1045,6 +1101,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             blurOpacity: settings.blurOpacity,
             blurTintColor: settings.activeBlurTintColor
         )
+        if settings.annotateArrowTailFade {
+            canvasState.activeDraft?.tailFadeEnabled = true
+        }
         syncBackdropBlurViews()
         needsDisplay = true
     }
@@ -1623,7 +1682,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             context.setBlendMode(.multiply)
         }
 
-        let path = buildCGPath(for: item)
         let color = item.strokeColor.nsColor
 
         switch item.mode {
@@ -1656,16 +1714,9 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 context.restoreGState()
             }
         case .arrow:
-            if let gradient = item.gradientPair {
-                context.addPath(path)
-                context.clip()
-                drawLinearGradient(gradient, from: item.startPoint, to: item.endPoint, in: context)
-            } else {
-                context.addPath(path)
-                context.setFillColor(color.cgColor)
-                context.fillPath()
-            }
+            drawDirectionalPolygon(item, in: context)
         case .rectangle, .circle:
+            let path = buildCGPath(for: item)
             if item.isFilled {
                 context.addPath(path)
                 context.setFillColor(color.withAlphaComponent(0.28).cgColor)
@@ -1673,7 +1724,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             }
             strokePath(path, item: item, color: color, in: context)
         case .freeHand, .highlighter:
-            strokePath(path, item: item, color: color, in: context)
+            if item.usesTaperedWedgeLine {
+                drawDirectionalPolygon(item, in: context)
+            } else {
+                let path = buildCGPath(for: item)
+                strokePath(path, item: item, color: color, in: context)
+            }
         case .blur:
             if let visibleRect = validatedVisibleBlurRect(for: item) {
                 let isDraft = canvasState.activeDraft?.id == item.id
@@ -1763,7 +1819,73 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         }
         context.restoreGState()
 
-        if isSelected && item.mode != .text {
+        if isSelected && item.usesDirectionalHandles {
+            let tail = item.tailHandleCenter
+            let tip = item.tipHandleCenter
+            let lightBlueNS = NSColor(SettingsView.themeLightBlue)
+            let lightBlueCG = lightBlueNS.cgColor
+            context.saveGState()
+            context.setBlendMode(.normal)
+            context.setStrokeColor(lightBlueCG)
+            context.setLineWidth(1.5)
+            context.setLineDash(phase: 0, lengths: [4, 3])
+            context.beginPath()
+            context.move(to: tail)
+            context.addLine(to: tip)
+            context.strokePath()
+
+            if canvasState.selectedIDs.count == 1 {
+                let axisAnchor = item.headScaleAxisAnchor
+                let headHandle = item.headScaleHandleCenter
+                context.setLineDash(phase: 0, lengths: [3, 2])
+                context.beginPath()
+                context.move(to: axisAnchor)
+                context.addLine(to: headHandle)
+                context.strokePath()
+
+                context.setLineDash(phase: 0, lengths: [])
+                let endpointRadius: CGFloat = 5.0
+                let whiteCG = NSColor.white.cgColor
+                let primaryBlueCG = NSColor(SettingsView.themeBlue).cgColor
+                for endpoint in [tail, tip] {
+                    let handleRect = CGRect(
+                        x: endpoint.x - endpointRadius,
+                        y: endpoint.y - endpointRadius,
+                        width: endpointRadius * 2.0,
+                        height: endpointRadius * 2.0
+                    )
+                    context.setFillColor(whiteCG)
+                    context.fillEllipse(in: handleRect)
+                    context.setStrokeColor(primaryBlueCG)
+                    context.setLineWidth(2.0)
+                    context.strokeEllipse(in: handleRect)
+                }
+
+                let haloRadius: CGFloat = 8.5
+                let haloRect = CGRect(
+                    x: headHandle.x - haloRadius,
+                    y: headHandle.y - haloRadius,
+                    width: haloRadius * 2.0,
+                    height: haloRadius * 2.0
+                )
+                context.setFillColor(lightBlueNS.withAlphaComponent(0.24).cgColor)
+                context.fillEllipse(in: haloRect)
+
+                let innerRadius: CGFloat = 5.5
+                let innerRect = CGRect(
+                    x: headHandle.x - innerRadius,
+                    y: headHandle.y - innerRadius,
+                    width: innerRadius * 2.0,
+                    height: innerRadius * 2.0
+                )
+                context.setFillColor(lightBlueCG)
+                context.fillEllipse(in: innerRect)
+                context.setStrokeColor(whiteCG)
+                context.setLineWidth(2.0)
+                context.strokeEllipse(in: innerRect)
+            }
+            context.restoreGState()
+        } else if isSelected && item.mode != .text {
             if let selectionBox = visibleNonTextSelectionBox(for: item) {
                 context.saveGState()
                 context.setBlendMode(.normal)
@@ -1799,6 +1921,151 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 }
                 context.restoreGState()
             }
+        }
+    }
+
+    private func drawDirectionalPolygon(_ item: AnnotationItem, in context: CGContext) {
+        let hasFiniteStart = item.startPoint.x.isFinite && item.startPoint.y.isFinite
+        let hasFiniteEnd = item.endPoint.x.isFinite && item.endPoint.y.isFinite
+        guard hasFiniteStart && hasFiniteEnd else { return }
+
+        let polygonPath = buildCGPath(for: item)
+        guard !polygonPath.isEmpty else { return }
+        let rawBox = polygonPath.boundingBoxOfPath
+        let hasFiniteRawOrigin = rawBox.origin.x.isFinite && rawBox.origin.y.isFinite
+        let hasFiniteRawSize = rawBox.size.width.isFinite && rawBox.size.height.isFinite
+        let isRawBoxFinite = hasFiniteRawOrigin && hasFiniteRawSize
+        guard !rawBox.isNull && isRawBoxFinite else { return }
+
+        let paddedBox = rawBox.insetBy(dx: -14.0, dy: -14.0)
+        let hasFinitePaddedOrigin = paddedBox.origin.x.isFinite && paddedBox.origin.y.isFinite
+        let hasFinitePaddedSize = paddedBox.size.width.isFinite && paddedBox.size.height.isFinite
+        let isPaddedBoxFinite = hasFinitePaddedOrigin && hasFinitePaddedSize
+        guard !paddedBox.isNull && isPaddedBoxFinite else { return }
+
+        let hasFiniteBoundsOrigin = bounds.origin.x.isFinite && bounds.origin.y.isFinite
+        let hasFiniteBoundsSize = bounds.size.width.isFinite && bounds.size.height.isFinite
+        let isBoundsFinite = hasFiniteBoundsOrigin && hasFiniteBoundsSize
+        guard isBoundsFinite else { return }
+
+        let hasPositiveBounds = bounds.width > 0 && bounds.height > 0
+        let visibleLayerRect = hasPositiveBounds ? paddedBox.intersection(bounds) : paddedBox
+        let isVisibleNonEmpty = !visibleLayerRect.isNull && !visibleLayerRect.isEmpty
+        let hasFiniteVisibleOrigin = visibleLayerRect.origin.x.isFinite && visibleLayerRect.origin.y.isFinite
+        let hasFiniteVisibleSize = visibleLayerRect.size.width.isFinite && visibleLayerRect.size.height.isFinite
+        let isVisibleFinite = hasFiniteVisibleOrigin && hasFiniteVisibleSize
+        let isVisibleBounded = visibleLayerRect.width <= 16_384.0 && visibleLayerRect.height <= 16_384.0
+        let canRenderVisible = isVisibleNonEmpty && isVisibleFinite
+        guard canRenderVisible && isVisibleBounded else { return }
+
+        if item.tailFadeEnabled {
+            let dx = Double(item.endPoint.x - item.startPoint.x)
+            let dy = Double(item.endPoint.y - item.startPoint.y)
+            let length = hypot(dx, dy)
+            if length.isFinite && length > 1e-3 {
+                let usesHeadAccents = !item.isHighlighter
+                context.saveGState()
+                if usesHeadAccents {
+                    context.setShadow(
+                        offset: CGSize(width: 0, height: -2.0),
+                        blur: 5.0,
+                        color: NSColor.black.withAlphaComponent(0.36).cgColor
+                    )
+                    context.beginTransparencyLayer(in: visibleLayerRect, auxiliaryInfo: nil)
+                }
+
+                context.saveGState()
+                context.addPath(polygonPath)
+                context.clip()
+                let startRGB = (item.gradientPair?.startColor ?? item.strokeColor).sanitized
+                let endRGB = (item.gradientPair?.endColor ?? item.strokeColor).sanitized
+                let startBaseAlpha = item.isHighlighter ? min(startRGB.alpha, 0.42) : startRGB.alpha
+                let endBaseAlpha = item.isHighlighter ? min(endRGB.alpha, 0.42) : endRGB.alpha
+                let locations: [CGFloat] = [0.0, 0.42, 0.74, 1.0]
+                let multipliers: [Double] = [0.02, 0.32, 0.96, 1.00]
+                var stopColors: [CGColor] = []
+                stopColors.reserveCapacity(locations.count)
+                for idx in 0..<locations.count {
+                    let t = Double(locations[idx])
+                    let mult = multipliers[idx]
+                    let r = startRGB.red + (endRGB.red - startRGB.red) * t
+                    let g = startRGB.green + (endRGB.green - startRGB.green) * t
+                    let b = startRGB.blue + (endRGB.blue - startRGB.blue) * t
+                    let baseAlpha = startBaseAlpha + (endBaseAlpha - startBaseAlpha) * t
+                    let stopAlpha = min(max(baseAlpha * mult, 0.0), 1.0)
+                    let stopColor = NSColor(
+                        srgbRed: CGFloat(r),
+                        green: CGFloat(g),
+                        blue: CGFloat(b),
+                        alpha: CGFloat(stopAlpha)
+                    )
+                    stopColors.append(stopColor.cgColor)
+                }
+                if let space = CGColorSpace(name: CGColorSpace.sRGB),
+                   let cgGradient = CGGradient(colorsSpace: space, colors: stopColors as CFArray, locations: locations) {
+                    context.drawLinearGradient(
+                        cgGradient,
+                        start: item.startPoint,
+                        end: item.endPoint,
+                        options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+                    )
+                }
+                context.restoreGState()
+
+                if usesHeadAccents {
+                    context.saveGState()
+                    context.addPath(polygonPath)
+                    context.setLineWidth(1.5)
+                    context.setLineJoin(.round)
+                    context.replacePathWithStrokedPath()
+                    context.clip()
+                    let rimLocations: [CGFloat] = [0.0, 0.52, 0.78, 1.0]
+                    let rimColors: [CGColor] = [
+                        NSColor.white.withAlphaComponent(0.0).cgColor,
+                        NSColor.white.withAlphaComponent(0.0).cgColor,
+                        NSColor.white.withAlphaComponent(0.78).cgColor,
+                        NSColor.white.withAlphaComponent(0.95).cgColor
+                    ]
+                    if let space = CGColorSpace(name: CGColorSpace.sRGB),
+                       let rimGradient = CGGradient(colorsSpace: space, colors: rimColors as CFArray, locations: rimLocations) {
+                        context.drawLinearGradient(
+                            rimGradient,
+                            start: item.startPoint,
+                            end: item.endPoint,
+                            options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+                        )
+                    }
+                    context.restoreGState()
+                    context.endTransparencyLayer()
+                }
+                context.restoreGState()
+                return
+            }
+        }
+
+        if let gradient = item.gradientPair {
+            let effectiveGradient: GradientPair
+            if item.isHighlighter {
+                let sAlpha = min(gradient.startColor.sanitized.alpha, 0.42)
+                let eAlpha = min(gradient.endColor.sanitized.alpha, 0.42)
+                effectiveGradient = GradientPair(
+                    startColor: gradient.startColor.withAlpha(sAlpha),
+                    endColor: gradient.endColor.withAlpha(eAlpha)
+                )
+            } else {
+                effectiveGradient = gradient
+            }
+            context.addPath(polygonPath)
+            context.clip()
+            drawLinearGradient(effectiveGradient, from: item.startPoint, to: item.endPoint, in: context)
+        } else {
+            let baseColor = item.strokeColor.sanitized
+            let resolvedColor = item.isHighlighter
+                ? baseColor.withAlpha(min(baseColor.alpha, 0.42)).nsColor
+                : baseColor.nsColor
+            context.addPath(polygonPath)
+            context.setFillColor(resolvedColor.cgColor)
+            context.fillPath()
         }
     }
 
@@ -1843,12 +2110,26 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let path = CGMutablePath()
         switch item.mode {
         case .freeHand, .highlighter:
-            guard let first = item.points.first else { return path }
-            let isFirstFinite = first.x.isFinite && first.y.isFinite
-            guard isFirstFinite else { return path }
-            path.move(to: first)
-            for pt in item.points.dropFirst() where pt.x.isFinite && pt.y.isFinite {
-                path.addLine(to: pt)
+            if item.usesTaperedWedgeLine {
+                let vertices = item.taperedLinePolygonPoints()
+                if let first = vertices.first {
+                    let isFirstFinite = first.x.isFinite && first.y.isFinite
+                    if isFirstFinite {
+                        path.move(to: first)
+                        for pt in vertices.dropFirst() where pt.x.isFinite && pt.y.isFinite {
+                            path.addLine(to: pt)
+                        }
+                        path.closeSubpath()
+                    }
+                }
+            } else {
+                guard let first = item.points.first else { return path }
+                let isFirstFinite = first.x.isFinite && first.y.isFinite
+                guard isFirstFinite else { return path }
+                path.move(to: first)
+                for pt in item.points.dropFirst() where pt.x.isFinite && pt.y.isFinite {
+                    path.addLine(to: pt)
+                }
             }
         case .arrow:
             let vertices = item.arrowPolygonPoints()
