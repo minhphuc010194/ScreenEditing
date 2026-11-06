@@ -147,6 +147,9 @@ public final class AppSettings: ObservableObject {
     @Published public var annotateToolIndicator: Bool {
         didSet { persist(annotateToolIndicator, forKey: Keys.annotateToolIndicator) }
     }
+    @Published public var annotateArrowTailFade: Bool {
+        didSet { persist(annotateArrowTailFade, forKey: Keys.annotateArrowTailFade) }
+    }
     @Published public var annotateFont: AnnotateFontOption {
         didSet { persistCodable(annotateFont, forKey: Keys.annotateFont) }
     }
@@ -428,6 +431,7 @@ public final class AppSettings: ObservableObject {
         self.whiteboardOpacity = Self.loadDouble(from: defaults, key: Keys.whiteboardOpacity, fallback: 1.0)
         self.touchDrawEnabled = Self.loadBool(from: defaults, key: Keys.touchDrawEnabled, fallback: false)
         self.annotateToolIndicator = Self.loadBool(from: defaults, key: Keys.annotateToolIndicator, fallback: true)
+        self.annotateArrowTailFade = Self.loadBool(from: defaults, key: Keys.annotateArrowTailFade, fallback: false)
         self.annotateFont = Self.loadCodable(from: defaults, key: Keys.annotateFont, fallback: .systemDefault)
         self.annotateFontSize = Self.loadDouble(from: defaults, key: Keys.annotateFontSize, fallback: 24.0)
         self.annotateTextPlaceholder = Self.loadBool(from: defaults, key: Keys.annotateTextPlaceholder, fallback: true)
@@ -627,6 +631,7 @@ public final class AppSettings: ObservableObject {
         whiteboardOpacity = 1.0
         touchDrawEnabled = false
         annotateToolIndicator = true
+        annotateArrowTailFade = false
         annotateFont = .systemDefault
         annotateFontSize = 24.0
         annotateTextPlaceholder = true
@@ -755,6 +760,7 @@ public final class AppSettings: ObservableObject {
         static let whiteboardOpacity = "presentify.whiteboardOpacity"
         static let touchDrawEnabled = "presentify.touchDrawEnabled"
         static let annotateToolIndicator = "presentify.annotateToolIndicator"
+        static let annotateArrowTailFade = "presentify.annotateArrowTailFade"
         static let annotateFont = "presentify.annotateFont"
         static let annotateFontSize = "presentify.annotateFontSize"
         static let annotateTextPlaceholder = "presentify.annotateTextPlaceholder"
@@ -802,7 +808,7 @@ public final class AppSettings: ObservableObject {
             autoEraseEnabled, autoEraseDelay, showAnnotateControls,
             annotateControlsVertical, autoHideAnnotateControls, whiteboardEnabled,
             whiteboardColor, whiteboardOpacity, touchDrawEnabled,
-            annotateToolIndicator, annotateFont, annotateFontSize,
+            annotateToolIndicator, annotateArrowTailFade, annotateFont, annotateFontSize,
             annotateTextPlaceholder, annotateSaveSession,
             screenshotSaveDirectoryPath, dimScreenOnAnnotate, dimScreenOpacity,
             toastInteractiveMode, toastHighlightMode, toastTouchDraw,
