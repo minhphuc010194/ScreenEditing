@@ -16,6 +16,9 @@
   <img src="https://img.shields.io/badge/Platform-macOS%2013%2B-1485FA" alt="macOS 13+" />
   <img src="https://img.shields.io/badge/Swift-5.9-61C7FF" alt="Swift 5.9" />
   <img src="https://img.shields.io/badge/Engine-C%2B%2B20%20CoreEngine-1485FA" alt="C++20 CoreEngine" />
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-61C7FF" alt="MIT License" />
+  </a>
 </p>
 
 <p align="center">
@@ -150,3 +153,8 @@ Pushing a version tag triggers `.github/workflows/release.yml` on `macos-14` to 
 ```bash
 git tag v8.6.1 && git push origin v8.6.1
 ```
+
+## License
+
+Released under the [MIT License](LICENSE).
+
