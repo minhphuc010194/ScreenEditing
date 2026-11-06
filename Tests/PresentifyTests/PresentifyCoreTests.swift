@@ -646,9 +646,36 @@ final class PresentifyCoreTests: XCTestCase {
         )
         if case .updateAvailable(let release) = manualOverrideStatus {
             XCTAssertEqual(release.tagName, "v9.0.0")
+            let checkRequest = updater.latestReleaseRequest()
+            XCTAssertEqual(
+                checkRequest?.url?.absoluteString,
+                "https://api.github.com/repos/minhphuc010194/ScreenEditing/releases/latest"
+            )
+            XCTAssertNil(checkRequest?.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertEqual(checkRequest?.value(forHTTPHeaderField: "Accept"), "application/vnd.github+json")
+
+            let downloadRequest = updater.assetDownloadRequest(for: release)
+            XCTAssertEqual(
+                downloadRequest?.url?.absoluteString,
+                "https://github.com/minhphuc010194/ScreenEditing/releases/download/v9.0.0/ScreenEditing.app.zip"
+            )
+            XCTAssertNil(downloadRequest?.value(forHTTPHeaderField: "Authorization"))
         } else {
             XCTFail("Expected user-initiated check to show update even if previously skipped")
         }
+
+        let traversalUpdater = AppUpdater(settings: settings, repositorySlug: "../../evil")
+        XCTAssertNil(traversalUpdater.latestReleaseRequest())
+        let hostSpoofUpdater = AppUpdater(settings: settings, repositorySlug: "evil.example.com#@owner/repo")
+        XCTAssertNil(hostSpoofUpdater.latestReleaseRequest())
+        let untrustedRelease = GitHubReleaseInfo(
+            tagName: "v9.1.0",
+            name: "Untrusted",
+            body: "",
+            htmlURL: "https://github.com/minhphuc010194/ScreenEditing/releases/tag/v9.1.0",
+            assets: [untrustedAsset]
+        )
+        XCTAssertNil(updater.assetDownloadRequest(for: untrustedRelease))
     }
 
     func testBlurToolShortcutGeometryModifiersHitTestAndLegacySession() {

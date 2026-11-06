@@ -181,37 +181,39 @@ public final class AppUpdater: ObservableObject {
         return nil
     }
 
-    private static func resolveLocalGitHubToken() -> String? {
-        let env = ProcessInfo.processInfo.environment
-        if let envToken = env["GITHUB_TOKEN"] ?? env["GH_TOKEN"] {
-            let trimmed = envToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return trimmed
-            }
+    public func latestReleaseRequest() -> URLRequest? {
+        let slugParts = repositorySlug.split(separator: "/", omittingEmptySubsequences: false)
+        let areSegmentsSafe = slugParts.allSatisfy { segment in
+            let isTraversal = segment == "." || segment == ".."
+            return !segment.isEmpty && !isTraversal
         }
-        let candidatePaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
-        for path in candidatePaths where FileManager.default.isExecutableFile(atPath: path) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = ["auth", "token"]
-            let outPipe = Pipe()
-            process.standardOutput = outPipe
-            process.standardError = Pipe()
-            do {
-                try process.run()
-                process.waitUntilExit()
-                if process.terminationStatus == 0 {
-                    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    if let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !token.isEmpty {
-                        return token
-                    }
-                }
-            } catch {
-                continue
-            }
+        let hasValidOwnerAndRepo = slugParts.count == 2 && areSegmentsSafe
+        let hasQueryFragmentOrSpace = repositorySlug.contains { ch in
+            let isQueryOrFragment = ch == "?" || ch == "#"
+            return isQueryOrFragment || ch.isWhitespace
         }
-        return nil
+        guard hasValidOwnerAndRepo && !hasQueryFragmentOrSpace,
+              let url = URL(string: "https://api.github.com/repos/\(repositorySlug)/releases/latest") else {
+            return nil
+        }
+        let isHTTPS = url.scheme?.lowercased() == "https"
+        let isGitHubAPI = url.host?.lowercased() == "api.github.com"
+        guard isHTTPS && isGitHubAPI else {
+            return nil
+        }
+        var request = URLRequest(url: url, timeoutInterval: 15.0)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("ScreenEditing/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
+    public func assetDownloadRequest(for release: GitHubReleaseInfo) -> URLRequest? {
+        guard let zipURL = Self.validatedZipAssetURL(in: release.assets) else {
+            return nil
+        }
+        var request = URLRequest(url: zipURL, timeoutInterval: 120.0)
+        request.setValue("ScreenEditing/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        return request
     }
 
     public func startAutomaticChecks() {
@@ -239,18 +241,12 @@ public final class AppUpdater: ObservableObject {
     }
 
     public func checkForUpdates(mode: UpdateCheckMode = .automatic) {
-        guard let url = URL(string: "https://api.github.com/repos/\(repositorySlug)/releases/latest") else {
+        guard let request = latestReleaseRequest() else {
             status = .failed(message: "Invalid repository URL.")
             return
         }
 
         status = .checking
-        var request = URLRequest(url: url, timeoutInterval: 15.0)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("ScreenEditing/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-        if let token = Self.resolveLocalGitHubToken() {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
@@ -319,30 +315,13 @@ public final class AppUpdater: ObservableObject {
     }
 
     public func downloadAndInstall(release: GitHubReleaseInfo) {
-        let token = Self.resolveLocalGitHubToken()
-        let downloadTargetURL: URL
-        var useOctetStreamAccept = false
-
-        if let token, let apiURL = Self.validatedAPIAssetURL(in: release.assets) {
-            downloadTargetURL = apiURL
-            useOctetStreamAccept = !token.isEmpty
-        } else if let zipURL = Self.validatedZipAssetURL(in: release.assets) {
-            downloadTargetURL = zipURL
-        } else {
+        guard let request = assetDownloadRequest(for: release) else {
             SafeExternalLinks.openHTTPS(release.htmlURL)
             status = .idle
             return
         }
 
         status = .downloading(progress: 0.15, version: release.tagName)
-        var request = URLRequest(url: downloadTargetURL, timeoutInterval: 120.0)
-        request.setValue("ScreenEditing/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-        if let token {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        if useOctetStreamAccept {
-            request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
-        }
 
         let session = URLSession(
             configuration: .ephemeral,
