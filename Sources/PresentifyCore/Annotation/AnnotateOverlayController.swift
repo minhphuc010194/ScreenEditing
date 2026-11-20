@@ -248,7 +248,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     public private(set) var activeTextField: NSTextField?
     public private(set) var editingAnnotationID: UUID?
     public private(set) var backdropBlurViews: [UUID: BackdropBlurRegionView] = [:]
-    public private(set) var isPostDrawAutoSelection = false
 
     private var editingInitialTextColor: RGBColor?
     private var editingInitialNSColor: NSColor?
@@ -258,7 +257,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     private var editingOverrideFontSize: Double?
     private var activeAnnotationTransform: ActiveAnnotationTransform?
     private var directionalGrabOffset: CGPoint = .zero
-    private var isApplyingPostDrawSelection = false
     private var isTrackpadGestureTransforming = false
     private var isDraggingSelection = false
     private var isMarqueeSelecting = false
@@ -289,14 +287,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             .sink { [weak self] _ in
                 self?.syncBackdropBlurViews()
                 self?.needsDisplay = true
-            }
-            .store(in: &cancellables)
-
-        canvasState.$selectedIDs
-            .dropFirst()
-            .sink { [weak self] _ in
-                guard let self, !self.isApplyingPostDrawSelection else { return }
-                self.isPostDrawAutoSelection = false
             }
             .store(in: &cancellables)
 
@@ -386,13 +376,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     var hasActiveMouseInteraction: Bool {
         let hasOrphanedDrag = activeAnnotationTransform != nil || isDraggingSelection
         return hasOrphanedDrag || isMarqueeSelecting
-    }
-
-    private func selectPostDrawAnnotation(_ id: UUID) {
-        isApplyingPostDrawSelection = true
-        canvasState.selectedIDs = [id]
-        isApplyingPostDrawSelection = false
-        isPostDrawAutoSelection = true
     }
 
     public func cancelActiveInteraction() {
@@ -773,7 +756,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let isControlDown = flags.contains(.control)
 
         if isCommandDown {
-            isPostDrawAutoSelection = false
             dragOriginPoint = point
             lastDragPoint = point
             if let hitID = canvasState.hitTestAnnotation(at: point) {
@@ -801,7 +783,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         }
 
         if let transform = hitTestSelectedAnnotationTransformHandle(at: point) {
-            isPostDrawAutoSelection = false
             activeAnnotationTransform = transform
             dragOriginPoint = point
             if case let .directionalHandle(initialItem, handle) = transform {
@@ -825,12 +806,10 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         if let hitID = canvasState.hitTestAnnotation(at: point),
            let hitItem = canvasState.annotations.first(where: { $0.id == hitID }) {
             let isAlreadySelected = canvasState.selectedIDs.contains(hitID)
-            let isExplicitSelection = isAlreadySelected && !isPostDrawAutoSelection
             let isTextItem = hitItem.mode == .text
             let isTextMode = settings.currentDrawMode == .text
             let isTextHitInTextMode = isTextMode && isTextItem
-            if isExplicitSelection || isTextHitInTextMode {
-                isPostDrawAutoSelection = false
+            if isAlreadySelected || isTextHitInTextMode {
                 let isDoubleClick = event.clickCount >= 2
                 if isDoubleClick && isTextItem {
                     canvasState.selectedIDs = [hitItem.id]
@@ -849,11 +828,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 needsDisplay = true
                 return
             }
-        }
-
-        if isPostDrawAutoSelection {
-            canvasState.selectedIDs.removeAll()
-            isPostDrawAutoSelection = false
         }
 
         if settings.currentDrawMode == .text {
@@ -1018,9 +992,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             isShiftDown: event.modifierFlags.contains(.shift),
             isOptionDown: event.modifierFlags.contains(.option)
         )
-        if let committedID = canvasState.finishStroke() {
-            selectPostDrawAnnotation(committedID)
-        }
+        canvasState.finishStroke()
         syncBackdropBlurViews()
         needsDisplay = true
     }
@@ -1082,10 +1054,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         guard settings.isTouchDrawActive else { return }
         let touches = event.touches(matching: .began, in: self)
         guard touches.count == 1, let touch = touches.first else { return }
-        if isPostDrawAutoSelection {
-            canvasState.selectedIDs.removeAll()
-            isPostDrawAutoSelection = false
-        }
         activeTouchIdentity = touch.identity
         let point = touchPoint(for: touch)
         cursorLocation = point
@@ -1124,9 +1092,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let touches = event.touches(matching: .ended, in: self)
         guard touches.contains(where: { $0.identity.isEqual(activeID) }) else { return }
         activeTouchIdentity = nil
-        if let committedID = canvasState.finishStroke() {
-            selectPostDrawAnnotation(committedID)
-        }
+        canvasState.finishStroke()
         syncBackdropBlurViews()
         needsDisplay = true
     }
@@ -1146,14 +1112,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
     }
 
     @objc public func undo(_ sender: Any?) {
-        isPostDrawAutoSelection = false
         canvasState.undo()
         syncBackdropBlurViews()
         needsDisplay = true
     }
 
     @objc public func redo(_ sender: Any?) {
-        isPostDrawAutoSelection = false
         canvasState.redo()
         syncBackdropBlurViews()
         needsDisplay = true
@@ -1266,7 +1230,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         guard activeTextField == nil else { return false }
 
         if normMods == KeyBinding.commandMask && keyCode == 0x06 {
-            isPostDrawAutoSelection = false
             canvasState.undo()
             syncBackdropBlurViews()
             needsDisplay = true
@@ -1275,14 +1238,12 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         let isCommandShiftZ = normMods == (KeyBinding.commandMask | KeyBinding.shiftMask) && keyCode == 0x06
         let isCommandY = normMods == KeyBinding.commandMask && keyCode == 0x10
         if isCommandShiftZ || isCommandY {
-            isPostDrawAutoSelection = false
             canvasState.redo()
             syncBackdropBlurViews()
             needsDisplay = true
             return true
         }
         if normMods == KeyBinding.commandMask && keyCode == 0x00 {
-            isPostDrawAutoSelection = false
             canvasState.selectedIDs = Set(canvasState.annotations.map(\.id))
             needsDisplay = true
             return true
@@ -1292,7 +1253,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             return true
         }
         if normMods == 0 && keyCode == 0x75 {
-            isPostDrawAutoSelection = false
             canvasState.deleteSelectedOrClearAll()
             syncBackdropBlurViews()
             needsDisplay = true
@@ -1334,7 +1294,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         case .highlighter: settings.selectOrToggleDrawMode(.highlighter)
         case .blur: settings.selectOrToggleDrawMode(.blur)
         case .clearAnnotate:
-            isPostDrawAutoSelection = false
             canvasState.deleteSelectedOrClearAll()
         case .decreaseLineWeight:
             if shouldAdjustTextSizeForWeightShortcut {
@@ -1377,7 +1336,6 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
                 onRequestCopyScreenshot?()
             }
         case .pasteAnnotations:
-            isPostDrawAutoSelection = false
             canvasState.pasteAnnotations()
         case .annotateShortcuts:
             settings.isShowingShortcutsCheatsheet.toggle()
@@ -1518,7 +1476,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
         field.removeFromSuperview()
         activeTextField = nil
 
-        if let committedID = canvasState.addOrUpdateTextAnnotation(
+        canvasState.addOrUpdateTextAnnotation(
             id: editID,
             at: origin,
             text: value,
@@ -1526,11 +1484,7 @@ public final class AnnotateCanvasView: NSView, NSTextFieldDelegate {
             fontName: resolvedFontName,
             fontSize: resolvedFontSize,
             isAutoErase: settings.autoEraseEnabled
-        ) {
-            selectPostDrawAnnotation(committedID)
-        } else {
-            isPostDrawAutoSelection = false
-        }
+        )
         window?.makeFirstResponder(self)
         needsDisplay = true
     }
