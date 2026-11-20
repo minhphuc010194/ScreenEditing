@@ -4082,7 +4082,27 @@ final class PresentifyCoreTests: XCTestCase {
         CustomColorPanelBridge.shared.colorPanelDidChange(panel)
     }
 
-    func testPostDrawAutoSelectionAllowsImmediateRecolorAndCornerScaleWithoutBreakingConsecutiveStrokes() {
+    func testMouseCommitLeavesNothingSelectedForEveryDrawingMode() {
+        let harness = makeCanvasHarness()
+        let target = (window: harness.window, view: harness.view)
+        let modes: [DrawMode] = [.arrow, .freeHand, .rectangle, .circle, .highlighter, .blur]
+
+        for (index, mode) in modes.enumerated() {
+            harness.settings.currentDrawMode = mode
+            performMouseDrag(
+                StrokeDragSpec(
+                    start: CGPoint(x: 40, y: 60),
+                    end: CGPoint(x: 140, y: 120),
+                    midpoints: [CGPoint(x: 90, y: 90)]
+                ),
+                on: target
+            )
+            XCTAssertEqual(harness.canvas.annotations.count, index + 1)
+            XCTAssertTrue(harness.canvas.selectedIDs.isEmpty)
+        }
+    }
+
+    func testDrawnAnnotationsStayUnselectedAndOnlyCommandClickEnablesRecolorAndCornerScale() {
         let headless = AnnotationCanvasState()
         headless.beginStroke(at: CGPoint(x: 10, y: 10), mode: .arrow, color: .red, lineWeight: 4.0)
         headless.updateStroke(to: CGPoint(x: 60, y: 40))
@@ -4126,11 +4146,12 @@ final class PresentifyCoreTests: XCTestCase {
         )
         XCTAssertEqual(canvas.annotations.count, 1)
         let arrowID = canvas.annotations[0].id
-        XCTAssertEqual(canvas.selectedIDs, [arrowID])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        let arrowSnapshot = canvas.annotations[0]
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
 
+        XCTAssertNotEqual(arrowSnapshot.strokeColor, settings.favColors[1])
         XCTAssertTrue(view.handleKeyCommand(keyCode: 0x13, modifiers: 0))
-        XCTAssertEqual(canvas.annotations[0].strokeColor, settings.favColors[1])
+        XCTAssertEqual(canvas.annotations[0], arrowSnapshot)
 
         let arrowTopRight = canvas.annotations[0].selectionScaleHandleCenters[2]
         performMouseDrag(
@@ -4140,10 +4161,9 @@ final class PresentifyCoreTests: XCTestCase {
             ),
             on: target
         )
-        XCTAssertFalse(view.isPostDrawAutoSelection)
-        XCTAssertEqual(canvas.annotations[0].startPoint, CGPoint(x: 40, y: 60))
-        XCTAssertEqual(canvas.annotations[0].endPoint.x, 170, accuracy: 1e-6)
-        XCTAssertEqual(canvas.annotations[0].endPoint.y, 140, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations.count, 2)
+        XCTAssertEqual(canvas.annotations[0], arrowSnapshot)
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
 
         settings.currentDrawMode = .freeHand
         performMouseDrag(
@@ -4154,10 +4174,9 @@ final class PresentifyCoreTests: XCTestCase {
             ),
             on: target
         )
-        XCTAssertEqual(canvas.annotations.count, 2)
-        let stemSnapshot = canvas.annotations[1]
-        XCTAssertEqual(canvas.selectedIDs, [stemSnapshot.id])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertEqual(canvas.annotations.count, 3)
+        let stemSnapshot = canvas.annotations[2]
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
 
         performMouseDrag(
             StrokeDragSpec(
@@ -4167,43 +4186,71 @@ final class PresentifyCoreTests: XCTestCase {
             ),
             on: target
         )
-        XCTAssertEqual(canvas.annotations.count, 3)
-        XCTAssertEqual(canvas.annotations[1], stemSnapshot)
-        XCTAssertEqual(canvas.selectedIDs, [canvas.annotations[2].id])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertEqual(canvas.annotations.count, 4)
+        XCTAssertEqual(canvas.annotations[2], stemSnapshot)
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
 
         settings.currentDrawMode = .rectangle
         performMouseDrag(
             StrokeDragSpec(start: CGPoint(x: 260, y: 50), end: CGPoint(x: 320, y: 100)),
             on: target
         )
-        XCTAssertEqual(canvas.annotations.count, 4)
-        let rectID = canvas.annotations[3].id
-        XCTAssertEqual(canvas.selectedIDs, [rectID])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertEqual(canvas.annotations.count, 5)
+        let rectID = canvas.annotations[4].id
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
 
         settings.currentDrawMode = .blur
         performMouseDrag(
             StrokeDragSpec(start: CGPoint(x: 260, y: 130), end: CGPoint(x: 335, y: 190)),
             on: target
         )
-        XCTAssertEqual(canvas.annotations.count, 5)
-        let blurID = canvas.annotations[4].id
-        XCTAssertEqual(canvas.selectedIDs, [blurID])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertEqual(canvas.annotations.count, 6)
+        let blurSnapshot = canvas.annotations[5]
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
         controls.selectFavoriteColor(at: 2)
-        XCTAssertEqual(canvas.annotations[4].blurTintColor, settings.favColors[2])
+        XCTAssertEqual(canvas.annotations[5], blurSnapshot)
 
         settings.currentDrawMode = .text
         view.mouseDown(with: makeMouseEvent(SyntheticMouseSpec(type: .leftMouseDown, location: CGPoint(x: 80, y: 240)), in: window))
-        view.activeTextField?.stringValue = "Auto Selected Text"
+        view.activeTextField?.stringValue = "Unselected Text"
         view.commitActiveTextEditing()
-        XCTAssertEqual(canvas.annotations.count, 6)
-        let textID = canvas.annotations[5].id
-        XCTAssertEqual(canvas.selectedIDs, [textID])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertEqual(canvas.annotations.count, 7)
+        let textSnapshot = canvas.annotations[6]
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
         XCTAssertTrue(view.handleKeyCommand(keyCode: 0x15, modifiers: 0))
-        XCTAssertEqual(canvas.annotations[5].strokeColor, settings.favColors[3])
+        XCTAssertEqual(canvas.annotations[6], textSnapshot)
+
+        let arrowBodyPoint = CGPoint(x: 90, y: 90)
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: arrowBodyPoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: arrowBodyPoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        XCTAssertEqual(canvas.selectedIDs, [arrowID])
+
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x14, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0].strokeColor, settings.favColors[2])
+
+        let selectedArrowTopRight = canvas.annotations[0].selectionScaleHandleCenters[2]
+        performMouseDrag(
+            StrokeDragSpec(
+                start: selectedArrowTopRight,
+                end: CGPoint(x: selectedArrowTopRight.x + 30, y: selectedArrowTopRight.y + 20)
+            ),
+            on: target
+        )
+        XCTAssertEqual(canvas.selectedIDs, [arrowID])
+        XCTAssertEqual(canvas.annotations.count, 7)
+        XCTAssertEqual(canvas.annotations[0].startPoint, CGPoint(x: 40, y: 60))
+        XCTAssertEqual(canvas.annotations[0].endPoint.x, 170, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].endPoint.y, 140, accuracy: 1e-6)
 
         settings.currentDrawMode = .rectangle
         let rectEdgePoint = CGPoint(x: 260, y: 75)
@@ -4220,15 +4267,62 @@ final class PresentifyCoreTests: XCTestCase {
             )
         )
         XCTAssertEqual(canvas.selectedIDs, [rectID])
-        XCTAssertFalse(view.isPostDrawAutoSelection)
 
         performMouseDrag(
             StrokeDragSpec(start: rectEdgePoint, end: CGPoint(x: 280, y: 90)),
             on: target
         )
-        XCTAssertEqual(canvas.annotations.count, 6)
-        XCTAssertEqual(canvas.annotations[3].startPoint, CGPoint(x: 280, y: 65))
-        XCTAssertEqual(canvas.annotations[3].endPoint, CGPoint(x: 340, y: 115))
+        XCTAssertEqual(canvas.annotations.count, 7)
+        XCTAssertEqual(canvas.annotations[4].startPoint, CGPoint(x: 280, y: 65))
+        XCTAssertEqual(canvas.annotations[4].endPoint, CGPoint(x: 340, y: 115))
+    }
+
+    func testDrawingAfterCommandClickSelectionClearsSelectionAndShortcutsLeaveBothStrokesUntouched() {
+        let harness = makeCanvasHarness()
+        let window = harness.window
+        let view = harness.view
+        let canvas = harness.canvas
+        let settings = harness.settings
+        let target = (window: window, view: view)
+
+        settings.selectFavoriteColor(index: 0)
+        settings.currentDrawMode = .arrow
+        performMouseDrag(
+            StrokeDragSpec(start: CGPoint(x: 40, y: 60), end: CGPoint(x: 140, y: 120)),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 1)
+        let firstSnapshot = canvas.annotations[0]
+
+        let arrowBodyPoint = CGPoint(x: 90, y: 90)
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: arrowBodyPoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: arrowBodyPoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        XCTAssertEqual(canvas.selectedIDs, [firstSnapshot.id])
+
+        settings.currentDrawMode = .rectangle
+        performMouseDrag(
+            StrokeDragSpec(start: CGPoint(x: 260, y: 50), end: CGPoint(x: 320, y: 100)),
+            on: target
+        )
+        XCTAssertEqual(canvas.annotations.count, 2)
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
+        let secondSnapshot = canvas.annotations[1]
+
+        XCTAssertNotEqual(firstSnapshot.strokeColor, settings.favColors[1])
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x13, modifiers: 0))
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(canvas.annotations[0], firstSnapshot)
+        XCTAssertEqual(canvas.annotations[1], secondSnapshot)
     }
 
     func testDirectAndLiveColorPanelRecoloringAcrossAllModesCoalescesUndo() {
@@ -5027,7 +5121,7 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(restored.annotations.count, canvas.annotations.count)
     }
 
-    func testPostDrawHighlighterAndMismatchedSelectedStrokeWeightStepAcrossFullRangeWithUndo() {
+    func testUnselectedHighlighterIgnoresWeightStepsUntilCommandClickThenStepsAcrossFullRangeWithUndo() {
         let harness = makeCanvasHarness()
         let window = harness.window
         let view = harness.view
@@ -5054,9 +5148,32 @@ final class PresentifyCoreTests: XCTestCase {
         )
         XCTAssertEqual(canvas.annotations.count, 1)
         let highlighterID = canvas.annotations[0].id
-        XCTAssertEqual(canvas.selectedIDs, [highlighterID])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
         XCTAssertEqual(canvas.annotations[0].lineWeight, 14.0, accuracy: 1e-6)
+        XCTAssertEqual(controls.displayedLineWeight, 6.0, accuracy: 1e-6)
+
+        let undoBeforeUnselectedSteps = canvas.undoStack.count
+        controls.increaseLineWeight()
+        XCTAssertEqual(settings.lineWeight, 8.0, accuracy: 1e-6)
+        XCTAssertTrue(view.handleKeyCommand(keyCode: 0x1E, modifiers: 0))
+        XCTAssertEqual(settings.lineWeight, 10.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.annotations[0].lineWeight, 14.0, accuracy: 1e-6)
+        XCTAssertEqual(canvas.undoStack.count, undoBeforeUnselectedSteps)
+
+        let highlighterPoint = CGPoint(x: 140, y: 120)
+        view.mouseDown(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseDown, location: highlighterPoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        view.mouseUp(
+            with: makeMouseEvent(
+                SyntheticMouseSpec(type: .leftMouseUp, location: highlighterPoint, modifiers: [.command]),
+                in: window
+            )
+        )
+        XCTAssertEqual(canvas.selectedIDs, [highlighterID])
         XCTAssertEqual(controls.displayedLineWeight, 14.0, accuracy: 1e-6)
 
         controls.increaseLineWeight()
@@ -5138,7 +5255,7 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(canvas.annotations[0].lineWeight, 1.0, accuracy: 1e-6)
     }
 
-    func testTouchDrawPostDrawAutoSelectionRecolorAndConsecutiveTouchStroke() {
+    func testTouchDrawCommitLeavesNothingSelectedAndConsecutiveTouchStrokeKeepsEarlierStroke() {
         let harness = makeCanvasHarness()
         let view = harness.view
         let canvas = harness.canvas
@@ -5167,16 +5284,14 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(canvas.annotations.count, 1)
         let firstID = canvas.annotations[0].id
         let firstSnapshot = canvas.annotations[0]
-        XCTAssertEqual(canvas.selectedIDs, [firstID])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
 
         controls.selectFavoriteColor(at: 2)
-        let expectedRecolor = settings.favColors[2]
-        XCTAssertEqual(canvas.annotations[0].strokeColor, expectedRecolor)
+        XCTAssertEqual(canvas.annotations[0], firstSnapshot)
 
+        canvas.selectedIDs = [firstID]
         view.touchesBegan(with: makeSingleTouchEvent("touch-2", (.began, NSPoint(x: 0.20, y: 0.30))))
         XCTAssertTrue(canvas.selectedIDs.isEmpty)
-        XCTAssertFalse(view.isPostDrawAutoSelection)
         XCTAssertNotNil(canvas.activeDraft)
 
         view.touchesMoved(with: makeSingleTouchEvent("touch-2", (.moved, NSPoint(x: 0.60, y: 0.65))))
@@ -5185,10 +5300,10 @@ final class PresentifyCoreTests: XCTestCase {
         XCTAssertEqual(canvas.annotations.count, 2)
         let secondID = canvas.annotations[1].id
         XCTAssertNotEqual(firstID, secondID)
-        XCTAssertEqual(canvas.selectedIDs, [secondID])
-        XCTAssertTrue(view.isPostDrawAutoSelection)
+        XCTAssertTrue(canvas.selectedIDs.isEmpty)
         XCTAssertEqual(canvas.annotations[0].startPoint, firstSnapshot.startPoint)
         XCTAssertEqual(canvas.annotations[0].endPoint, firstSnapshot.endPoint)
+        XCTAssertEqual(canvas.annotations[0], firstSnapshot)
     }
 
     func testDoubleClickInlineTextRecolorSingleUndoEscapeRestoreAndSingleRandomSample() {
