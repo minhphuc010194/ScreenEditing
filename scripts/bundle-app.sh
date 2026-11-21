@@ -27,6 +27,10 @@ if [[ -n "${APP_VERSION:-}" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" "${CONTENTS_DIR}/Info.plist"
 fi
 
+if [[ -n "${APP_BUILD:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_BUILD}" "${CONTENTS_DIR}/Info.plist"
+fi
+
 codesign --force --deep --sign - --identifier "com.screenediting.app" "${APP_DIR}"
 
 ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${ZIP_PATH}"

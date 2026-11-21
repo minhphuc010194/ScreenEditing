@@ -482,7 +482,7 @@ public struct SettingsView: View {
             Text("ScreenEditing")
                 .font(.system(size: 22, weight: .bold))
 
-            Text("Version \(appUpdater.currentVersion) (Build 68)")
+            Text("Version \(appUpdater.currentVersion) (Build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "dev"))")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
 
