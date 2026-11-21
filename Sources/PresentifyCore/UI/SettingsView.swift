@@ -500,6 +500,9 @@ public struct SettingsView: View {
                 Button("YouTube") {
                     SafeExternalLinks.openHTTPS("https://www.youtube.com/@BumLowkey")
                 }
+                Button("GitHub") {
+                    SafeExternalLinks.openHTTPS("https://github.com/\(appUpdater.repositorySlug)")
+                }
             }
             .buttonStyle(.bordered)
         }
