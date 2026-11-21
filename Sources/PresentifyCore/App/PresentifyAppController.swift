@@ -348,7 +348,10 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
                     self?.checkForUpdatesFromMenu()
                 }
             )
-            popover.contentViewController = NSHostingController(rootView: menuView)
+            let hosting = NSHostingController(rootView: menuView)
+            hosting.sizingOptions = .preferredContentSize
+            popover.contentViewController = hosting
+            popover.contentSize = hosting.view.fittingSize
             menuPopover = popover
         }
     }
@@ -360,6 +363,11 @@ public final class PresentifyAppController: NSObject, NSApplicationDelegate {
         } else {
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            if let window = popover.contentViewController?.view.window,
+               let visibleFrame = button.window?.screen?.visibleFrame,
+               window.frame.maxY > visibleFrame.maxY {
+                window.setFrameTopLeftPoint(NSPoint(x: window.frame.minX, y: visibleFrame.maxY))
+            }
             popover.contentViewController?.view.window?.makeKey()
             startPopoverMonitors()
         }
